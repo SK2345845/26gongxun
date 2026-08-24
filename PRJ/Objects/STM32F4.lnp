@@ -1,0 +1,28 @@
+--cpu=Cortex-M4.fp.sp
+".\objects\main.o"
+".\objects\stm32f4xx_it.o"
+".\objects\board.o"
+".\objects\emm_v5.o"
+".\objects\usart.o"
+".\objects\startup_stm32f40_41xxx.o"
+".\objects\system_stm32f4xx.o"
+".\objects\fifo.o"
+".\objects\delay.o"
+".\objects\stm32f4xx_gpio.o"
+".\objects\stm32f4xx_rcc.o"
+".\objects\stm32f4xx_usart.o"
+".\objects\misc.o"
+".\objects\croutine.o"
+".\objects\event_groups.o"
+".\objects\list.o"
+".\objects\queue.o"
+".\objects\stream_buffer.o"
+".\objects\tasks.o"
+".\objects\timers.o"
+".\objects\port.o"
+".\objects\heap_4.o"
+".\objects\moving.o"
+--library_type=microlib --strict --scatter ".\Objects\STM32F4.sct"
+--summary_stderr --info summarysizes --map --load_addr_map_info --xref --callgraph --symbols
+--info sizes --info totals --info unused --info veneers
+--list ".\Listings\STM32F4.map" -o .\Objects\STM32F4.axf

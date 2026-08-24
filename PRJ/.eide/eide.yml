@@ -1,0 +1,210 @@
+version: "4.1"
+name: STM32_UART_CMD
+type: ARM
+deviceName: null
+packDir: null
+srcDirs: []
+virtualFolder:
+  name: <virtual_root>
+  files: []
+  folders:
+    - name: APP
+      files:
+        - path: ../APP/main.c
+        - path: ../APP/stm32f4xx_conf.h
+        - path: ../APP/stm32f4xx_it.c
+        - path: ../APP/stm32f4xx_it.h
+      folders: []
+    - name: BSP
+      files:
+        - path: ../BSP/board.c
+        - path: ../BSP/board.h
+        - path: ../BSP/Emm_V5.c
+        - path: ../BSP/Emm_V5.h
+        - path: ../BSP/usart.c
+        - path: ../BSP/usart.h
+      folders: []
+    - name: CMSIS
+      files:
+        - path: ../CMSIS/startup_stm32f40_41xxx.s
+        - path: ../CMSIS/system_stm32f4xx.c
+      folders: []
+    - name: DRIVERS
+      files:
+        - path: ../DRIVERS/fifo.c
+        - path: ../DRIVERS/fifo.h
+        - path: ../DRIVERS/delay.c
+        - path: ../DRIVERS/delay.h
+      folders: []
+    - name: LIB
+      files:
+        - path: ../LIB/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_gpio.c
+        - path: ../LIB/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_rcc.c
+        - path: ../LIB/STM32F4xx_StdPeriph_Driver/src/stm32f4xx_usart.c
+        - path: ../LIB/STM32F4xx_StdPeriph_Driver/src/misc.c
+      folders: []
+    - name: FreeRTOS_CORE
+      files:
+        - path: ../FreeRTOS/croutine.c
+        - path: ../FreeRTOS/event_groups.c
+        - path: ../FreeRTOS/list.c
+        - path: ../FreeRTOS/queue.c
+        - path: ../FreeRTOS/stream_buffer.c
+        - path: ../FreeRTOS/tasks.c
+        - path: ../FreeRTOS/timers.c
+      folders: []
+    - name: FreeRTOS_PROTABLE
+      files:
+        - path: ../FreeRTOS/portable/RVDS/ARM_CM4F/port.c
+        - path: ../FreeRTOS/portable/MemMang/heap_4.c
+      folders: []
+    - name: Hardware
+      files:
+        - path: ../Hardware/moving.c
+        - path: ../Hardware/moving.h
+      folders: []
+dependenceList: []
+outDir: build
+miscInfo:
+  uid: 1718d14fc020890414707566580c1edf
+targets:
+  V1.0:
+    cppPreprocessAttrs:
+      defineList:
+        - STM32F40_41xxx
+        - USE_STDPERIPH_DRIVER
+      incList:
+        - ../APP
+        - ../BSP
+        - ../CMSIS
+        - ../DRIVERS
+        - ../LIB/STM32F4xx_StdPeriph_Driver/inc
+        - ../FreeRTOS/include
+        - ../FreeRTOS/portable/RVDS/ARM_CM4F
+        - ../Hardware
+        - .cmsis/include
+        - RTE/_V1.0
+      libList: []
+    excludeList: []
+    settings:
+      debugger: cortex-debug
+    toolchain: AC5
+    toolchainConfigMap:
+      AC5:
+        archExtensions: ""
+        cpuType: Cortex-M4
+        floatingPointHardware: single
+        options:
+          version: 4
+          afterBuildTasks: []
+          asm-compiler:
+            defines: []
+          beforeBuildTasks: []
+          c/cpp-compiler:
+            CXX_FLAGS: --diag_suppress=1 --diag_suppress=1295
+            C_FLAGS: --diag_suppress=1 --diag_suppress=1295
+            c99-mode: true
+            one-elf-section-per-function: true
+            optimization: level-0
+            warnings: all-warnings
+          global:
+            output-debug-info: enable
+            use-microLIB: true
+          linker:
+            $outputTaskExcludes:
+              - .bin
+            output-format: elf
+            ro-base: "0x08000000"
+            rw-base: "0x20000000"
+            xo-base: ""
+        scatterFilePath: ""
+        storageLayout:
+          RAM:
+            - id: 1
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 2
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 3
+              isChecked: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              noInit: false
+              tag: RAM
+            - id: 1
+              isChecked: true
+              mem:
+                size: "0x20000"
+                startAddr: "0x20000000"
+              noInit: false
+              tag: IRAM
+            - id: 2
+              isChecked: true
+              mem:
+                size: "0x10000"
+                startAddr: "0x10000000"
+              noInit: false
+              tag: IRAM
+          ROM:
+            - id: 1
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 3
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: ROM
+            - id: 1
+              isChecked: true
+              isStartup: true
+              mem:
+                size: "0x100000"
+                startAddr: "0x8000000"
+              tag: IROM
+            - id: 2
+              isChecked: false
+              isStartup: false
+              mem:
+                size: "0x0"
+                startAddr: "0x0"
+              tag: IROM
+        useCustomScatterFile: false
+    uploadConfigMap:
+      JLink:
+        baseAddr: ""
+        bin: ""
+        cpuInfo:
+          cpuName: "null"
+          vendor: "null"
+        otherCmds: ""
+        proType: 1
+        speed: 8000
+      OpenOCD:
+        baseAddr: "0x08000000"
+        bin: ""
+        interface: cmsis-dap
+        target: stm32f4x
+    uploader: OpenOCD
