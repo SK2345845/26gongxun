@@ -117,6 +117,8 @@ class SerialReader:
         self.thr = None
         self.running = False
         self.latest = None
+        self.lost = False          # 非 stop() 导致的意外退出（如拔线）
+        self.lost_reason = ""
         self._lock = threading.Lock()
 
     def start(self):
@@ -147,6 +149,12 @@ class SerialReader:
         if self.ser:
             try:
                 if self.ser.is_open:
+                    # 1) 发 STOP 命令（A5 25）停扫描数据流
+                    self.ser.write(b"\xA5\x25")
+                    self.ser.flush()
+                    # 2) DTR 拉高关电机（与 start 时 dtr=False 开电机对应），
+                    #    否则断开后雷达一直空转
+                    self.ser.dtr = True
                     self.ser.close()
             except Exception:
                 pass
@@ -157,6 +165,7 @@ class SerialReader:
         while self.running:
             try:
                 if not self.ser or not self.ser.is_open:
+                    self.lost_reason = "串口句柄失效"
                     break
                 d = self.ser.read(256)
                 if d:
@@ -165,8 +174,12 @@ class SerialReader:
                     if pts is not None:
                         with self._lock:
                             self.latest = pts
-            except Exception:
+            except Exception as e:
+                self.lost_reason = str(e) or "串口读异常"
                 break
+        # running 仍为 True 说明不是用户主动断开 → 判定为意外掉线
+        if self.running:
+            self.lost = True
         self.running = False
 
     def get_latest(self):
@@ -441,6 +454,13 @@ class MainWindow(QMainWindow):
     # ========== 点云刷新 ==========
     def _update_plot(self):
         if not self.reader:
+            return
+        # 意外掉线检测（拔线等）：由 50ms 定时器在主线程安全处理
+        if self.reader.lost:
+            reason = self.reader.lost_reason
+            self.reader = None
+            self._set_ui(False)
+            self.statusBar().showMessage(f"⚠ 串口掉线: {reason}", 6000)
             return
         raw = self.reader.get_latest()
         if raw:
