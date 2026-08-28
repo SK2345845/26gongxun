@@ -6,7 +6,10 @@ clicked with the mouse (press-and-hold) to drive without the keyboard.
 """
 
 import argparse
+import queue
 import sys
+import threading
+import time
 import tkinter as tk
 from tkinter import ttk
 
@@ -21,6 +24,8 @@ except ImportError:
 
 COMMAND_KEYS = {"w", "a", "s", "d", "e", "r"}
 SPEED_STEP = 20
+HEARTBEAT_MS = 200       # 心跳周期：周期性重发当前指令，单字节丢失可自愈
+RX_POLL_MS = 100         # 主线程轮询接收队列的周期
 
 # ---- 调色板（现代浅色） ----
 BG          = "#eef2f7"
@@ -66,14 +71,24 @@ class OmniRemote:
         self.key_letters = {}
         self.key_subs = {}
 
+        # ---- 接收线程 / 心跳 / 日志相关状态 ----
+        self.rx_queue = queue.Queue()
+        self.reader_thread = None
+        self._heartbeat_job = None
+        self._rx_poll_job = None
+        self._closing = False
+        self._rx_partial = ""    # 接收数据的半行缓冲
+        self._log_seq = 0        # 日志行颜色标签序号
+
         self.window = tk.Tk()
         self.window.title("全向底盘遥控")
-        self.window.geometry("620x500")
-        self.window.minsize(540, 440)
+        self.window.geometry("620x660")
+        self.window.minsize(540, 600)
         self.window.configure(bg=BG)
 
         self._build_topbar()
         self._build_pad()
+        self._build_log()
         self._build_speedbar()
 
         self.window.bind("<KeyPress>", self.on_key_press)
@@ -111,6 +126,32 @@ class OmniRemote:
         self.status = tk.Label(bar, text="未连接", bg=BG, fg=ERR_COLOR,
                                font=(FONT, 10, "bold"))
         self.status.pack(side="right")
+
+        self.tx_label = tk.Label(bar, text="TX: -", bg=BG, fg=KEY_SUB,
+                                 font=(FONT, 10, "bold"))
+        self.tx_label.pack(side="right", padx=(0, 16))
+
+    def _build_log(self):
+        """MCU 回显日志区：后台线程读串口，主线程定时刷新显示。"""
+        bar = tk.Frame(self.window, bg=BG)
+        bar.pack(fill="x", padx=18, pady=(2, 0))
+        tk.Label(bar, text="MCU 回显（[REMOTE] cmd=w = 单片机已收到并执行）",
+                 bg=BG, fg="#64748b", font=(FONT, 9)).pack(side="left")
+        tk.Button(bar, text="清空", command=self._clear_log,
+                  bg="#e2e8f0", fg="#334155", activebackground="#cbd5e1",
+                  relief="flat", bd=0, padx=10, cursor="hand2",
+                  font=(FONT, 9)).pack(side="right")
+
+        self.log_text = tk.Text(self.window, height=8, state="disabled",
+                                bg="#0f172a", fg="#cbd5e1", insertbackground="#cbd5e1",
+                                relief="flat", padx=10, pady=6,
+                                font=("Consolas", 9))
+        self.log_text.pack(fill="x", padx=18, pady=(2, 4))
+
+    def _clear_log(self):
+        self.log_text.config(state="normal")
+        self.log_text.delete("1.0", "end")
+        self.log_text.config(state="disabled")
 
     def _build_pad(self):
         self.canvas = tk.Canvas(self.window, bg=BG, highlightthickness=0)
@@ -229,7 +270,12 @@ class OmniRemote:
 
     def toggle_connection(self) -> None:
         if self.serial and self.serial.is_open:
-            self.serial.write(b"x")
+            self._stop_heartbeat()
+            try:
+                self.serial.write(b"x")
+                self.serial.flush()
+            except (serial.SerialException, OSError):
+                pass
             self.serial.close()
             self.serial = None
             self.connect_button.config(text="连接")
@@ -242,19 +288,127 @@ class OmniRemote:
             self.status.config(text="请先选择串口", fg=ERR_COLOR)
             return
         try:
-            self.serial = serial.Serial(self.port, self.baudrate, timeout=0)
+            # timeout=0.1：接收线程 read 最多阻塞 100ms，既不丢收也不空转
+            self.serial = serial.Serial(self.port, self.baudrate, timeout=0.1)
             self.connect_button.config(text="断开")
             self.status.config(text=f"已连接 {self.port}", fg=OK_COLOR)
             self.last_command = "x"
+            self._rx_partial = ""
+            self._log_system(f"已连接 {self.port} @ {self.baudrate}")
+            # 启动接收线程 + 心跳重发 + 主线程接收轮询
+            self.reader_thread = threading.Thread(
+                target=self._reader_loop, daemon=True)
+            self.reader_thread.start()
+            self._start_heartbeat()
+            self._start_rx_poll()
         except serial.SerialException as error:
             self.serial = None
             self.status.config(text=f"连接失败: {error}", fg=ERR_COLOR)
 
     def send(self, command: str) -> None:
         if self.serial and self.serial.is_open and command != self.last_command:
-            self.serial.write(command.encode("ascii"))
-            self.serial.flush()
+            try:
+                self.serial.write(command.encode("ascii"))
+                self.serial.flush()
+            except (serial.SerialException, OSError) as error:
+                self._on_rx_error(f"发送失败: {error}")
+                return
             self.last_command = command
+            self.tx_label.config(text=f"TX: {command}", fg=ACCENT)
+
+    # -------------------------------------------------- 心跳重发（可靠性核心）
+    def _start_heartbeat(self) -> None:
+        if self._heartbeat_job is None:
+            self._heartbeat_job = self.window.after(HEARTBEAT_MS, self._heartbeat)
+
+    def _stop_heartbeat(self) -> None:
+        if self._heartbeat_job is not None:
+            self.window.after_cancel(self._heartbeat_job)
+            self._heartbeat_job = None
+
+    def _heartbeat(self) -> None:
+        """每 200ms 重发当前指令。协议是幂等的：收到重复 w 只是重设同一速度。
+        这样即使某个字节在串口上丢了（STM32 RX 只有单字节缓冲），
+        200ms 后的下一次心跳就会自愈，不会出现'按了没反应还不知道'。"""
+        self._heartbeat_job = None
+        if self._closing or not self.serial or not self.serial.is_open:
+            return
+        try:
+            self.serial.write(self.last_command.encode("ascii"))
+            self.serial.flush()
+        except (serial.SerialException, OSError) as error:
+            self._on_rx_error(f"心跳发送失败: {error}")
+            return
+        self._heartbeat_job = self.window.after(HEARTBEAT_MS, self._heartbeat)
+
+    # -------------------------------------------------- 串口接收（线程 + 队列）
+    def _reader_loop(self) -> None:
+        """后台线程：只负责读串口塞队列，绝不碰 tkinter。"""
+        ser = self.serial
+        try:
+            while self.serial is ser and ser.is_open and not self._closing:
+                data = ser.read(256)
+                if data:
+                    self.rx_queue.put(data)
+        except (serial.SerialException, OSError) as error:
+            self.rx_queue.put(("__RX_ERROR__", str(error)))
+
+    def _start_rx_poll(self) -> None:
+        if self._rx_poll_job is None:
+            self._rx_poll_job = self.window.after(RX_POLL_MS, self._poll_rx)
+
+    def _poll_rx(self) -> None:
+        """主线程：把队列里的数据搬到日志区（tkinter 只允许主线程操作控件）。"""
+        try:
+            while True:
+                item = self.rx_queue.get_nowait()
+                if isinstance(item, tuple):
+                    self._on_rx_error(f"串口读失败: {item[1]}")
+                    continue
+                self._feed_rx(item.decode("utf-8", errors="replace"))
+        except queue.Empty:
+            pass
+        if not self._closing:
+            self._rx_poll_job = self.window.after(RX_POLL_MS, self._poll_rx)
+        else:
+            self._rx_poll_job = None
+
+    def _feed_rx(self, text: str) -> None:
+        self._rx_partial += text
+        while "\n" in self._rx_partial:
+            line, self._rx_partial = self._rx_partial.split("\n", 1)
+            line = line.strip("\r").rstrip()
+            if line:
+                self._log_line(line)
+
+    def _on_rx_error(self, message: str) -> None:
+        self._log_system(f"[错误] {message}")
+        self.status.config(text=f"串口异常: {message}", fg=ERR_COLOR)
+        if self.serial and self.serial.is_open:
+            try:
+                self.serial.close()
+            except (serial.SerialException, OSError):
+                pass
+        self.serial = None
+        self.connect_button.config(text="连接")
+
+    # -------------------------------------------------- 日志显示
+    def _log_line(self, text: str, color: str = "#cbd5e1") -> None:
+        stamp = time.strftime("%H:%M:%S")
+        tag = f"c{self._log_seq}"
+        self._log_seq += 1
+        self.log_text.config(state="normal")
+        self.log_text.tag_config(tag, foreground=color)
+        self.log_text.insert("end", f"{stamp}  {text}\n", tag)
+        # 只保留最近 200 行
+        total = int(self.log_text.index("end-1c").split(".")[0])
+        if total > 200:
+            self.log_text.delete("1.0", f"{total - 200}.0")
+        self.log_text.see("end")
+        self.log_text.config(state="disabled")
+
+    def _log_system(self, text: str) -> None:
+        self._log_line(text, color="#fbbf24")
 
     # ---------------------------------------------------------------- 输入
     def on_key_press(self, event: tk.Event) -> None:
@@ -308,8 +462,12 @@ class OmniRemote:
         if not self.serial or not self.serial.is_open:
             return
         # 固件用换行做终止符解析 +/-，这里发 "+\r\n" / "-\r\n"
-        self.serial.write(("+\r\n" if direction > 0 else "-\r\n").encode("ascii"))
-        self.serial.flush()
+        try:
+            self.serial.write(("+\r\n" if direction > 0 else "-\r\n").encode("ascii"))
+            self.serial.flush()
+        except (serial.SerialException, OSError) as error:
+            self._on_rx_error(f"发送失败: {error}")
+            return
         self.speed = max(20, min(1000, self.speed + direction * SPEED_STEP))
         self._update_speed_text()
 
@@ -320,18 +478,30 @@ class OmniRemote:
         self._highlight("x")
 
     def close(self) -> None:
+        if self._closing:
+            return
+        self._closing = True
+        self._stop_heartbeat()
+        if self._rx_poll_job is not None:
+            self.window.after_cancel(self._rx_poll_job)
+            self._rx_poll_job = None
         if self.serial and self.serial.is_open:
-            self.serial.write(b"x")
-            self.serial.flush()
+            try:
+                self.serial.write(b"x")
+                self.serial.flush()
+            except (serial.SerialException, OSError):
+                pass
             self.serial.close()
-        self.window.destroy()
+        try:
+            self.window.destroy()
+        except tk.TclError:
+            pass
 
     def run(self) -> None:
         try:
             self.window.mainloop()
         finally:
-            if self.serial and self.serial.is_open:
-                self.close()
+            self.close()
 
 
 def main() -> None:
