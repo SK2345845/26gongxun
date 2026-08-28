@@ -459,6 +459,9 @@ class OmniRemote:
         self.window.focus_set()
 
     def send_speed_adjust(self, direction: int) -> None:
+        # 速度值本地即时更新（未连接串口也可见），连接状态下再同步发送给固件
+        self.speed = max(20, min(1000, self.speed + direction * SPEED_STEP))
+        self._update_speed_text()
         if not self.serial or not self.serial.is_open:
             return
         # 固件用换行做终止符解析 +/-，这里发 "+\r\n" / "-\r\n"
@@ -467,9 +470,6 @@ class OmniRemote:
             self.serial.flush()
         except (serial.SerialException, OSError) as error:
             self._on_rx_error(f"发送失败: {error}")
-            return
-        self.speed = max(20, min(1000, self.speed + direction * SPEED_STEP))
-        self._update_speed_text()
 
     def stop(self) -> None:
         self.pressed.clear()
