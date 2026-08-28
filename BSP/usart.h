@@ -5,19 +5,52 @@
 #include "fifo.h"
 
 /**********************************************************
-***	Emm_V5.0²½½ø±Õ»·¿ØÖÆÀı³Ì
-***	±àĞ´×÷Õß£ºZHANGDATOU
-***	¼¼ÊõÖ§³Ö£ºÕÅ´óÍ·±Õ»·ËÅ·ş
-***	ÌÔ±¦µêÆÌ£ºhttps://zhangdatou.taobao.com
-***	CSDN²©¿Í£ºhttp s://blog.csdn.net/zhangdatou666
-***	qq½»Á÷Èº£º262438510
+***	Emm_V5.0ï¿½ï¿½ï¿½ï¿½ï¿½Õ»ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½ï¿½
+***	ï¿½ï¿½Ğ´ï¿½ï¿½ï¿½ß£ï¿½ZHANGDATOU
+***	ï¿½ï¿½ï¿½ï¿½Ö§ï¿½Ö£ï¿½ï¿½Å´ï¿½Í·ï¿½Õ»ï¿½ï¿½Å·ï¿½
+***	ï¿½Ô±ï¿½ï¿½ï¿½ï¿½Ì£ï¿½https://zhangdatou.taobao.com
+***	CSDNï¿½ï¿½ï¿½Í£ï¿½http s://blog.csdn.net/zhangdatou666
+***	qqï¿½ï¿½ï¿½ï¿½Èºï¿½ï¿½262438510
 **********************************************************/
 
 extern __IO bool rxFrameFlag;
 extern __IO uint8_t rxCmd[FIFO_SIZE];
 extern __IO uint8_t rxCount;
 
+#define USART1_RX_BUF_SIZE 64
+extern __IO uint8_t usart1_rx_buf[USART1_RX_BUF_SIZE];
+extern __IO uint8_t usart1_rx_head;
+extern __IO uint8_t usart1_rx_tail;
+
+#define USART_EXT_RX_BUF_SIZE 256
+extern __IO uint8_t uart5_rx_buf[USART_EXT_RX_BUF_SIZE];
+extern __IO uint16_t uart5_rx_head;
+extern __IO uint16_t uart5_rx_tail;
+extern __IO uint8_t usart6_rx_buf[USART_EXT_RX_BUF_SIZE];
+extern __IO uint16_t usart6_rx_head;
+extern __IO uint16_t usart6_rx_tail;
+
 void usart_SendCmd(__IO uint8_t *cmd, uint8_t len);
 void usart_SendByte(uint16_t data);
+
+// USART1è°ƒè¯•ä¸²å£ï¼šPA9-TXã€PA10-RXï¼Œ115200 8N1
+void usart1_SendByte(uint16_t data);
+void usart1_SendString(const char *str);
+uint8_t usart1_ReadByte(uint8_t *data);
+
+// æ‰©å±•ä¸²å£ï¼šUSART2 PA2/PA3ã€UART4 PC10/PC11ã€UART5 PC12/PD2ã€USART6 PG14/PG9
+void usart2_SendByte(uint16_t data);
+void uart4_SendByte(uint16_t data);
+void uart5_SendByte(uint16_t data);
+void usart6_SendByte(uint16_t data);
+void usart2_SendString(const char *str);
+void uart4_SendString(const char *str);
+void uart5_SendString(const char *str);
+void usart6_SendString(const char *str);
+void uart4_SendData(const uint8_t *data, uint16_t len);
+void uart5_SendData(const uint8_t *data, uint16_t len);
+void usart6_SendData(const uint8_t *data, uint16_t len);
+uint8_t uart5_ReadByte(uint8_t *data);
+uint8_t usart6_ReadByte(uint8_t *data);
 
 #endif

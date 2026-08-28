@@ -10,14 +10,14 @@
       <TargetName>V1.0</TargetName>
       <ToolsetNumber>0x4</ToolsetNumber>
       <ToolsetName>ARM-ADS</ToolsetName>
-      <pCCUsed>5060528::V5.06 update 5 (build 528)::ARMCC</pCCUsed>
+      <pCCUsed>5060960::V5.06 update 7 (build 960)::.\ARMCC</pCCUsed>
       <uAC6>0</uAC6>
       <TargetOption>
         <TargetCommonOption>
           <Device>STM32F407VG</Device>
           <Vendor>STMicroelectronics</Vendor>
-          <PackID>Keil.STM32F4xx_DFP.1.0.8</PackID>
-          <PackURL>http://www.keil.com/pack</PackURL>
+          <PackID>Keil.STM32F4xx_DFP.3.1.1</PackID>
+          <PackURL>https://www.keil.com/pack/</PackURL>
           <Cpu>IRAM(0x20000000,0x20000) IRAM2(0x10000000,0x10000) IROM(0x08000000,0x100000) CPUTYPE("Cortex-M4") FPU2 CLOCK(12000000) ELITTLE</Cpu>
           <FlashUtilSpec></FlashUtilSpec>
           <StartupFile></StartupFile>
@@ -439,6 +439,36 @@
               <FileType>5</FileType>
               <FilePath>..\BSP\usart.h</FilePath>
             </File>
+            <File>
+              <FileName>scanner.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\scanner.c</FilePath>
+            </File>
+            <File>
+              <FileName>scanner.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\scanner.h</FilePath>
+            </File>
+            <File>
+              <FileName>rplidar.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\rplidar.c</FilePath>
+            </File>
+            <File>
+              <FileName>rplidar.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\rplidar.h</FilePath>
+            </File>
+            <File>
+              <FileName>lidar_link.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\lidar_link.c</FilePath>
+            </File>
+            <File>
+              <FileName>lidar_link.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\lidar_link.h</FilePath>
+            </File>
           </Files>
         </Group>
         <Group>
@@ -498,6 +528,11 @@
               <FileName>stm32f4xx_usart.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\LIB\STM32F4xx_StdPeriph_Driver\src\stm32f4xx_usart.c</FilePath>
+            </File>
+            <File>
+              <FileName>stm32f4xx_dma.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\LIB\STM32F4xx_StdPeriph_Driver\src\stm32f4xx_dma.c</FilePath>
             </File>
             <File>
               <FileName>misc.c</FileName>
@@ -573,6 +608,16 @@
               <FileName>moving.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\Hardware\moving.h</FilePath>
+            </File>
+            <File>
+              <FileName>arm.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\Hardware\arm.c</FilePath>
+            </File>
+            <File>
+              <FileName>arm.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\Hardware\arm.h</FilePath>
             </File>
           </Files>
         </Group>

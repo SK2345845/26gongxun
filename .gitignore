@@ -1,0 +1,25 @@
+# Keil MDK 编译产物
+PRJ/Objects/
+PRJ/Listings/
+PRJ/*.o
+PRJ/*.d
+PRJ/*.crf
+PRJ/*.lst
+PRJ/*.htm
+PRJ/*.dep
+PRJ/*.iex
+PRJ/*.lnp
+PRJ/build_*.log
+PRJ/JLinkLog.txt
+
+# Keil 个人界面配置（每人各自生成，不共享）
+PRJ/*.uvguix.*
+
+# IDE / 编辑器
+.vscode/
+.idea/
+*.code-workspace
+
+# 系统
+.DS_Store
+Thumbs.db

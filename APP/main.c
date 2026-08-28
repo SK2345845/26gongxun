@@ -3,6 +3,10 @@
 #include "usart.h"
 #include "Emm_V5.h"
 #include "moving.h"
+#include "arm.h"
+#include "scanner.h"
+#include "rplidar.h"
+#include "lidar_link.h"
 
 /**********************************************************
 ***	Emm_V5.0 步进闭环控制工程 (FreeRTOS)
@@ -20,14 +24,46 @@ void User_Sequential_Logic(void)
 	// 1. 上电稳定等待 500ms（非阻塞释放 CPU）
 	vTaskDelay(pdMS_TO_TICKS(500));
 
-	// 2. 顺序执行流程：调用底盘前进函数，传入目标脉冲数（如 32000 即 10 圈）
-	zhuan_ni(32000);
+	// 2. 【底盘调试模式】仅运行底盘遥控任务，其它任务暂时停用
+	usart1_SendString("[REMOTE] chassis-only debug mode\r\n");
+	usart1_SendString("[REMOTE] WASD move, E/R rotate, +/- speed, X stop\r\n");
+	usart1_SendString("[REMOTE] press 'p' to probe/spin drivers 1-4\r\n");
 
-	// 3. 执行完毕后进入休眠
+	// 3. 关键：速度模式运行前先使能4个底盘电机（否则驱动器忽略速度指令）
+	Chassis_Remote_Enable();
+
+	// 4. 关闭USART1接收中断（该硬件上RXNE中断不触发），改用轮询读取
+	Chassis_Remote_RxProbe_Begin();
+
+	// 5. 主循环：轮询读取USART1并驱动底盘。收到 w 会回显 [REMOTE] cmd=w，
+	//    并向USART3发送速度指令。若回显有、车不动 → 问题在电机侧(USART3/驱动器)。
 	while(1)
 	{
-		vTaskDelay(pdMS_TO_TICKS(1000));
+		Chassis_Remote_Process();
+		vTaskDelay(pdMS_TO_TICKS(2));
 	}
+
+	/* ===== 以下为机械臂/扫码/雷达任务，底盘调试期间暂时停用，调好后可恢复 =====
+	Scanner_Init();
+	Lidar_Init();
+	uint32_t sent_lidar_rev = 0;
+	while(1)
+	{
+		Arm_Lift_Debug_Process();
+		Scanner_Process();
+		Lidar_Process();
+		{
+			LidarPoint_t *points;
+			uint16_t count = Lidar_GetScan(&points);
+			if(count > 0 && Lidar_GetRevCount() != sent_lidar_rev)
+			{
+				sent_lidar_rev = Lidar_GetRevCount();
+				LidarLink_SendScan(points, count, sent_lidar_rev);
+			}
+		}
+		vTaskDelay(pdMS_TO_TICKS(20));
+	}
+	========================================================================= */
 }
 
 /**
