@@ -10,8 +10,10 @@
 
 导航（体积感知版，连通图 + A*）：
   - 节点 = 九宫格接近点；边 = 九宫格相邻节点之间的直线路段
-  - 机器人有实际体积（300×300）：障碍贴边时路段不封锁（机器人擦边过），
-    但代价升高 → A* 优先走宽敞路，实在没路才贴边挤
+  - 机器人按 300×300 轴对齐方形建模（与绘制一致，不旋转）：
+    路段可通行性 = 车体扫掠区域（线段⊕方形的闵可夫斯基和，斜向最大对角
+    扫掠半宽 300√2/2≈212）到障碍的精确距离，撞不撞角也算得清
+  - 障碍贴边时路段不封锁（车擦边过），但代价升高 → A* 优先宽敞路
   - 路段真被堵死 → 在障碍两侧自动生成绕行途经点（绿点），贴着障碍局部绕行
   - 完全无路 → 该路段封锁（红），A* 换路或报告无路径
   - 路径点任务队列：启停区→二维码板→原料区→粗加工区→暂存区→原料区→粗加工区→暂存区→启停区
@@ -136,15 +138,22 @@ def pt_rect_dist(px, py, x0, y0, x1, y1):
 
 
 def zone_point_clear(px, py):
-    """单点是否满足对静态禁区（黄区/暂存/粗加工/轮盘）的安全距离"""
+    """机器人（300×300 轴对齐方形，中心 P）是否与静态禁区无碰撞：
+    黄区/暂存/粗加工按矩形-矩形精确相交判定；轮盘按方形-圆形距离判定。
+    注意：不是中心点判距离——方形的角在斜向时探得比 150 远。"""
+    x0, y0 = px - ROBOT_HALF, py - ROBOT_HALF
+    x1, y1 = px + ROBOT_HALF, py + ROBOT_HALF
     for (rx, ry) in YELLOW:
-        if pt_rect_dist(px, py, rx, ry, rx + YELLOW_SIZE, ry + YELLOW_SIZE) < CLEAR_RECT:
+        if not (x1 < rx or x0 > rx + YELLOW_SIZE or
+                y1 < ry or y0 > ry + YELLOW_SIZE):
             return False
-    if pt_rect_dist(px, py, *ZC_RECT) < CLEAR_RECT:
-        return False
-    if pt_rect_dist(px, py, *CG_RECT) < CLEAR_RECT:
-        return False
-    if math.hypot(px - TURNTABLE_C[0], py - TURNTABLE_C[1]) < CLEAR_RECT + TURNTABLE_R:
+    for (rx0, ry0, rx1, ry1) in (ZC_RECT, CG_RECT):
+        if not (x1 < rx0 or x0 > rx1 or y1 < ry0 or y0 > ry1):
+            return False
+    # 方形-圆形：中心距的 x/y 分量各收回半车宽
+    dx = max(abs(px - TURNTABLE_C[0]) - ROBOT_HALF, 0)
+    dy = max(abs(py - TURNTABLE_C[1]) - ROBOT_HALF, 0)
+    if math.hypot(dx, dy) < TURNTABLE_R:
         return False
     return True
 
@@ -166,30 +175,91 @@ def obstacle_spot_ok(x, y):
     return True
 
 
+def _convex_hull(pts):
+    """Andrew 单调链凸包（点数很少，够用）"""
+    pts = sorted(set(pts))
+    if len(pts) <= 2:
+        return pts
+    def half(seq):
+        out = []
+        for p in seq:
+            while len(out) >= 2 and \
+                  (out[-1][0]-out[-2][0])*(p[1]-out[-2][1]) - \
+                  (out[-1][1]-out[-2][1])*(p[0]-out[-2][0]) <= 0:
+                out.pop()
+            out.append(p)
+        return out
+    lower = half(pts)
+    upper = half(pts[::-1])
+    return lower[:-1] + upper[:-1]
+
+
+def _poly_contains(poly, p):
+    """射线法：点是否在多边形内"""
+    x, y = p
+    inside = False
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        if (y0 > y) != (y1 > y):
+            xin = x0 + (y - y0) / (y1 - y0) * (x1 - x0)
+            if xin > x:
+                inside = not inside
+    return inside
+
+
+def _swept_polygon(ax, ay, bx, by):
+    """车沿路段 A→B 行驶的扫掠区域 = 线段 ⊕ 300×300 轴对齐方形（闵可夫斯基和）。
+    返回凸包多边形（轴对齐路段退化为矩形，斜向路段为六边形，
+    横向最大扫掠半宽 300√2/2 ≈ 212——这就是会撞角的元凶）。"""
+    h = ROBOT_HALF
+    pts = [(ax - h, ay - h), (ax + h, ay - h), (ax + h, ay + h), (ax - h, ay + h),
+           (bx - h, by - h), (bx + h, by - h), (bx + h, by + h), (bx - h, by + h)]
+    return _convex_hull(pts)
+
+
+def swept_point_dist(ax, ay, bx, by, ox, oy):
+    """障碍中心 O 到车体扫掠区域的最小距离（在区域内返回 0）"""
+    poly = _swept_polygon(ax, ay, bx, by)
+    if _poly_contains(poly, (ox, oy)):
+        return 0.0
+    worst = float("inf")
+    n = len(poly)
+    for i in range(n):
+        x0, y0 = poly[i]
+        x1, y1 = poly[(i + 1) % n]
+        d = pt_seg_dist(ox, oy, x0, y0, x1, y1)
+        if d < worst:
+            worst = d
+    return worst
+
+
 def obstacle_fit_clear(ax, ay, bx, by, obstacles):
-    """机器人中心沿路段 (a,b) 行驶时，与最近障碍表面之间的最小净空。
-    用点到线段的精确距离，不采样——障碍贴边还是挡路一目了然。"""
+    """机器人沿路段行驶时，与最近障碍表面之间的最小净空。
+    按扫掠区域精确计算：斜向路段自动把对角扫掠宽度（最大300√2）算进去，
+    车头/车尾的角撞不撞得到，一眼便知。"""
     worst = float("inf")
     for (ox, oy) in obstacles:
-        d = pt_seg_dist(ox, oy, ax, ay, bx, by) - OBSTACLE_R
+        d = swept_point_dist(ax, ay, bx, by, ox, oy) - OBSTACLE_R
         if d < worst:
             worst = d
     return worst
 
 
 def segment_clear(ax, ay, bx, by, obstacles):
-    """路段可通行判定（考虑机器人实际体积）：
-    - 静态禁区是"墙"：沿线采样，任意点距禁区边缘 < CLEAR_RECT → 不可通行
-    - 障碍物看净空：路段线到障碍中心距离 ≥ ROBOT_HALF+OBSTACLE_R+SAFETY_MARGIN
-      （即障碍表面距机器人行驶线 ≥ 半车宽+余量）
-      → 障碍贴边时不封锁（机器人擦边通过），只有真正挡住去路才封锁"""
+    """路段可通行判定（机器人按 300×300 轴对齐方形建模）：
+    - 静态禁区是"墙"：沿路密集采样，任一位置车体方形与禁区相交 → 不可通行
+      （斜向路段方形扫掠更宽，采样判定自动覆盖）
+    - 障碍物：车体扫掠区域（线段⊕方形的凸包）表面距障碍表面 ≥ SAFETY_MARGIN
+      → 障碍贴边时不封锁（车擦边通过），只有真撞上才封锁"""
     length = math.hypot(bx - ax, by - ay)
-    steps = max(2, int(length / 30))
+    steps = max(2, int(length / 20))
     for i in range(steps + 1):
         t = i / steps
         if not zone_point_clear(ax + (bx - ax) * t, ay + (by - ay) * t):
             return False
-    return obstacle_fit_clear(ax, ay, bx, by, obstacles) >= ROBOT_HALF + SAFETY_MARGIN
+    return obstacle_fit_clear(ax, ay, bx, by, obstacles) >= SAFETY_MARGIN
 
 
 def edge_cost(ax, ay, bx, by, obstacles):
@@ -197,7 +267,7 @@ def edge_cost(ax, ay, bx, by, obstacles):
     净空充裕 → 1.0；越贴边越贵（上限 1+SOFT_PENALTY）。
     A* 自然优先走宽敞路，实在没路才贴边挤。不可通行返回 None。"""
     clear = obstacle_fit_clear(ax, ay, bx, by, obstacles)
-    if clear < ROBOT_HALF + SAFETY_MARGIN:
+    if clear < SAFETY_MARGIN:
         return None
     if not segment_clear(ax, ay, bx, by, obstacles):
         return None

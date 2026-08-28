@@ -41,9 +41,10 @@ check("贴边障碍→边可经绕行点通过", st == "via", f"status={st}")
 check("生成绕障途经点", any(n.startswith("~") for n in coords))
 for n, (x, y) in coords.items():
     if n.startswith("~"):
-        d = math.hypot(x - ox, y - oy) - fm.OBSTACLE_R
-        check(f"绕障点{n}表面净空≥{fm.ROBOT_HALF + fm.SAFETY_MARGIN:.0f}",
-              d >= fm.ROBOT_HALF + fm.SAFETY_MARGIN - 1e-9, f"clear={d:.0f}")
+        # 新语义：车体方形放在绕障点上，扫掠面距障碍表面 ≥ SAFETY_MARGIN
+        d = fm.swept_point_dist(x, y, x, y, ox, oy) - fm.OBSTACLE_R
+        check(f"绕障点{n}扫掠面净空≥{fm.SAFETY_MARGIN:.0f}",
+              d >= fm.SAFETY_MARGIN - 1e-9, f"clear={d:.0f}")
 
 # 场景B：障碍正挡在路段中点 → 边必须 via 或 blocked
 adj2, coords2, status2, via2 = fm.build_graph([(mx, my)])
@@ -55,6 +56,23 @@ if st2 == "via":
         if n.startswith("~"):
             d = math.hypot(x - mx, y - my) - fm.OBSTACLE_R
             check(f"绕障点{n}净空≥机器人半径", d >= fm.ROBOT_HALF - 1e-9, f"clear={d:.0f}")
+
+# 场景E：斜向路段撞角——圆盘模型的盲区（用户实车反馈）
+# 45° 路段，障碍距行驶线垂直距离 200mm > 旧圆盘阈值 185：
+# 旧模型判定"能过"，但方形车的角实际扫进障碍 → 新模型必须识别
+dax, day, dbx, dby = 600, 1000, 900, 1300
+corner_ob = (1000, 1117)
+old_disc_clear = abs((corner_ob[0]-dax)*(dby-day) - (corner_ob[1]-day)*(dbx-dax)) / \
+                 math.hypot(dbx-dax, dby-day) - fm.OBSTACLE_R
+check("撞角场景：旧圆盘模型确实判'能过'(证明盲区存在)",
+      old_disc_clear >= fm.ROBOT_HALF + fm.SAFETY_MARGIN, f"圆盘净空={old_disc_clear:.0f}")
+corner_clear = fm.obstacle_fit_clear(dax, day, dbx, dby, [corner_ob])
+check("撞角场景：扫掠模型正确判'撞'", corner_clear < fm.SAFETY_MARGIN,
+      f"扫掠净空={corner_clear:.0f}")
+# 对照：障碍离得足够远时扫掠模型不误伤
+far_ob = (1250, 1150)
+far_clear = fm.obstacle_fit_clear(dax, day, dbx, dby, [far_ob])
+check("对照：远处障碍扫掠净空充足", far_clear >= fm.SAFETY_MARGIN, f"净空={far_clear:.0f}")
 
 # 场景A：无障碍 → 全部 open，S1→QR 有路径
 adj0, coords0, status0, via0 = fm.build_graph([])
