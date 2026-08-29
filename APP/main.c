@@ -5,13 +5,57 @@
 #include "moving.h"
 #include "arm.h"
 #include "scanner.h"
+#include "task_code.h"
 #include "rplidar.h"
 #include "lidar_link.h"
+#include <string.h>
 
 /**********************************************************
 ***     Emm_V5.0 步进闭环控制工程 (FreeRTOS)
 ***     main.c 仅负责硬件初始化与主干顺序控制逻辑
 **********************************************************/
+
+/**
+        * @brief   扫码结果 → 任务码解析入库（含重复码去重）
+        * @note    连续/感应模式下模块可能连读同一个二维码，
+        *          同一内容 2 秒内只入库一次；非法码不覆盖已有任务
+        */
+static void Scanner_TaskCode_Poll(void)
+{
+        static Scanner_Code_t code;
+        static char last_raw[TASK_RAW_MAX] = "";
+        static uint32_t last_tick = 0;
+        char brief[96];
+
+        while (Scanner_GetCode(&code))
+        {
+                if (code.len == (TASK_RAW_MAX - 1) &&
+                    strcmp(code.code, last_raw) == 0 &&
+                    (code.tick - last_tick) < pdMS_TO_TICKS(2000))
+                {
+                        continue;   /* 2 秒内重复扫到同一个码，跳过 */
+                }
+
+                if (TaskCode_Accept(code.code))
+                {
+                        strcpy(last_raw, code.code);
+                        last_tick = code.tick;
+                        usart1_SendString("[TASK] 任务码已入库: ");
+                        usart1_SendString(code.code);
+                        usart1_SendString("\r\n");
+                        TaskCode_FormatBrief(TaskCode_Current(), brief, sizeof(brief));
+                        usart1_SendString("[TASK] ");
+                        usart1_SendString(brief);
+                        usart1_SendString("\r\n");
+                }
+                else
+                {
+                        usart1_SendString("[TASK] 无效任务码(不覆盖): ");
+                        usart1_SendString(code.code);
+                        usart1_SendString("\r\n");
+                }
+        }
+}
 
 /**
         * @brief   用户主干顺序控制逻辑
@@ -52,12 +96,14 @@ void User_Sequential_Logic(void)
 
         /* ===== 以下为机械臂/扫码/雷达任务，底盘调试期间暂时停用，调好后可恢复 =====
         Scanner_Init();
+        TaskCode_Init();
         Lidar_Init();
         uint32_t sent_lidar_rev = 0;
         while(1)
         {
                 Arm_Lift_Debug_Process();
                 Scanner_Process();
+                Scanner_TaskCode_Poll();   // 扫码 → 任务码解析入库（去重）
                 Lidar_Process();
                 {
                         LidarPoint_t *points;
