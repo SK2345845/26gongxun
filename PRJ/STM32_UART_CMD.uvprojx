@@ -395,6 +395,11 @@
               <FilePath>..\APP\task_code.c</FilePath>
             </File>
             <File>
+              <FileName>hmi_menu.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\APP\hmi_menu.c</FilePath>
+            </File>
+            <File>
               <FileName>task_code.h</FileName>
               <FileType>5</FileType>
               <FilePath>..\APP\task_code.h</FilePath>
@@ -453,6 +458,16 @@
               <FileName>scanner.c</FileName>
               <FileType>1</FileType>
               <FilePath>..\BSP\scanner.c</FilePath>
+            </File>
+            <File>
+              <FileName>hmi_tjc.c</FileName>
+              <FileType>1</FileType>
+              <FilePath>..\BSP\hmi_tjc.c</FilePath>
+            </File>
+            <File>
+              <FileName>hmi_tjc.h</FileName>
+              <FileType>5</FileType>
+              <FilePath>..\BSP\hmi_tjc.h</FilePath>
             </File>
             <File>
               <FileName>scanner.h</FileName>

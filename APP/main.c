@@ -6,6 +6,7 @@
 #include "arm.h"
 #include "scanner.h"
 #include "task_code.h"
+#include "hmi_menu.h"
 #include "rplidar.h"
 #include "lidar_link.h"
 #include <string.h>
@@ -40,6 +41,7 @@ static void Scanner_TaskCode_Poll(void)
                 {
                         strcpy(last_raw, code.code);
                         last_tick = code.tick;
+                        HMI_Menu_NotifyCode(code.code, 1);
                         usart1_SendString("[TASK] 任务码已入库: ");
                         usart1_SendString(code.code);
                         usart1_SendString("\r\n");
@@ -50,6 +52,7 @@ static void Scanner_TaskCode_Poll(void)
                 }
                 else
                 {
+                        HMI_Menu_NotifyCode(code.code, 0);
                         usart1_SendString("[TASK] 无效任务码(不覆盖): ");
                         usart1_SendString(code.code);
                         usart1_SendString("\r\n");
@@ -88,9 +91,13 @@ void User_Sequential_Logic(void)
 
         // 5. 主循环：轮询读取USART1并驱动底盘。收到 w 会回显 [REMOTE] cmd=w，
         //    并向USART3发送速度指令。若回显有、车不动 → 问题在电机侧(USART3/驱动器)。
+        //    串口屏（USART2）同步挂上：主菜单/任务页/扫码页/遥控页可用，
+        //    遥控页方向键「按住走、松开停」，与 USART1 遥控并存。
+        HMI_Menu_Init();
         while(1)
         {
                 Chassis_Remote_Process();
+                HMI_Menu_Process();   // 事件分发 + 周期刷新（内部自带 200ms 节流）
                 vTaskDelay(pdMS_TO_TICKS(2));
         }
 
