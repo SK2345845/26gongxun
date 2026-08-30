@@ -343,9 +343,14 @@ class MergeWindow(fm.MainWindow):
         h3.addWidget(self.f2b)
         v.addLayout(h3)
 
-        self.mg = QPushButton("合并分析 + 路径规划")
+        self.mg = QPushButton("合并分析（仅识别障碍）")
         self.mg.clicked.connect(self._merge_analyze)
         v.addWidget(self.mg)
+
+        self.plan_btn = QPushButton("确认障碍 · 规划路线")
+        self.plan_btn.clicked.connect(self._default_task)
+        self.plan_btn.setStyleSheet("font-weight:bold")
+        v.addWidget(self.plan_btn)
 
         # 双视角过滤（默认关）：勾选后单视角障碍剔除
         h4 = QHBoxLayout()
@@ -658,8 +663,8 @@ class MergeWindow(fm.MainWindow):
         self.st.setText(f"障碍 {len(self.obstacles)} 个 · 视场 {self.fov_spin.value()}°"
                         f" · {self.rng_spin.value()}mm · 基准 {p1['start']}{h1:.0f}°/"
                         f"{p2['start']}{h2:.0f}°")
-        self.robot_st.setText(f"状态: 检测到 {len(self.obstacles)} 个障碍，规划默认任务")
-        self._default_task()             # 用检测到的障碍跑 A*，画出路径
+        self.robot_st.setText(f"状态: 检测到 {len(self.obstacles)} 个障碍，确认无误后点「规划路线」")
+        # 不立刻规划：先看障碍对不对，人工确认后再开始
 
     # ---------------- 叠加合并点云 / 障碍显示 ----------------
     def _draw_map(self):
