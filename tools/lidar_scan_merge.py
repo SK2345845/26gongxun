@@ -204,25 +204,17 @@ def dbscan(points, eps, min_pts):
 def detect_obstacles(world_points):
     """世界坐标点列表 → 障碍中心列表 [(x, y), ...]
 
-    过滤链：固定设施/场外掩膜 → DBSCAN 聚类 → 簇尺寸判墙（大簇二次拆分）。
+    过滤链：固定设施/场外掩膜 → DBSCAN 聚类 → 簇尺寸判墙。
     场外不用距离门限（对角线可达 3.4m，门限会误杀场内点），
     统一转世界坐标后按场地矩形做几何裁剪。
+
+    注意：不要对超标簇做"二次拆分抢救"——远处墙面点距>45mm 时会把
+    连续墙切碎成一串假障碍（实测翻车），宁可偶发漏检也要保墙滤除的可靠性。
     """
     keep = [(x, y) for x, y in world_points if not is_excluded(x, y)]
     clusters = dbscan(keep, DBSCAN_EPS, DBSCAN_MIN_PTS)
-    out = []
-    for cx, cy, _, ext, members in clusters:
-        if ext <= MAX_CLUSTER_EXTENT:
-            out.append((cx, cy))
-            continue
-        # 大簇不整团扔：障碍挨着别的回波会被链式聚类吞掉（实测 25 点真障碍簇
-        # 被连坐误扔）。用更小邻域二次拆分，紧凑子簇照样算障碍；
-        # 真墙点距密、拆完仍是大条 → 照样扔
-        for sx, sy, sn, sext, _ in dbscan(members, DBSCAN_SPLIT_EPS,
-                                          DBSCAN_MIN_PTS):
-            if sext <= MAX_CLUSTER_EXTENT:
-                out.append((sx, sy))
-    return out
+    return [(cx, cy) for cx, cy, _, ext, _ in clusters
+            if ext <= MAX_CLUSTER_EXTENT]
 
 
 def scan_ports():
