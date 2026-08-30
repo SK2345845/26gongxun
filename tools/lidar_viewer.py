@@ -16,6 +16,8 @@ RPLIDAR C1 实时点云显示（PyQt5 版，串口下拉选择）
 
 import sys
 import math
+import time
+import struct
 import threading
 
 import numpy as np
@@ -64,6 +66,7 @@ EXPECTED_PTS_1M = 3.0       # φ50 圆柱在 1m 处的期望点数（实测校�
 PERSIST_FRAMES = 5          # 位置持续性窗口：最近 N 帧里同位置反复出现 → 稳定障碍
 MATCH_RADIUS_MM = 120.0     # 跨帧配同一障碍的位置容差 (mm)
 MIN_CONFIDENCE = 60         # 置信度低于此值不显示（但照样计入持续性窗口攒分）
+DEFAULT_RPM = 600           # 电机转速：600RPM=10Hz 标准；300RPM≈5Hz 每圈点数×2
 # ==========================================
 
 
@@ -127,10 +130,11 @@ class LidarParser:
 class SerialReader:
     """后台串口线程：读串口 → 解析 → 保存最新一圈点"""
 
-    def __init__(self, port, baud, parser):
+    def __init__(self, port, baud, parser, rpm=DEFAULT_RPM):
         self.port = port
         self.baud = baud
         self.parser = parser
+        self.rpm = rpm
         self.ser = None
         self.thr = None
         self.running = False
@@ -149,6 +153,15 @@ class SerialReader:
             self.ser.dtr = False
         except Exception:
             pass
+        # 设置电机转速（协议 MOTOR_SPEED_CTRL：A5 A8 02 + RPM 小端16位）
+        # C1 闭环电机，掉速自动补偿；转速越低每圈点数越多（5000点/s 固定）
+        if self.rpm:
+            try:
+                self.ser.write(b"\xA5\xA8\x02" + struct.pack("<H", int(self.rpm)))
+                time.sleep(0.05)                # 等响应描述符到达
+                self.ser.reset_input_buffer()   # 丢弃应答，别喂进解析器
+            except Exception:
+                pass
         # 发 SCAN 命令（A5 20，无校验）
         try:
             self.ser.write(b"\xA5\x20")
@@ -159,6 +172,17 @@ class SerialReader:
         self.thr = threading.Thread(target=self._loop, daemon=True)
         self.thr.start()
         return True
+
+    def set_rpm(self, rpm):
+        """在线调速（已连接时调用）。应答描述符可能被读线程收走，解析器可自行重对齐"""
+        self.rpm = rpm
+        if self.ser and self.ser.is_open:
+            try:
+                self.ser.write(b"\xA5\xA8\x02" + struct.pack("<H", int(rpm)))
+                return True
+            except Exception:
+                return False
+        return False
 
     def stop(self):
         self.running = False
@@ -269,6 +293,20 @@ class MainWindow(QMainWindow):
         self.cn = QPushButton("🔌 连接")
         self.cn.clicked.connect(self._toggle_connect)
         bar.addWidget(self.cn)
+
+        bar.addSpacing(6)
+        bar.addWidget(QLabel("转速RPM:"))
+        self.rpm_spin = QSpinBox()
+        self.rpm_spin.setRange(150, 900)
+        self.rpm_spin.setSingleStep(50)
+        self.rpm_spin.setValue(DEFAULT_RPM)
+        self.rpm_spin.setToolTip("600=10Hz标准；300≈5Hz，每圈点数×2（静止采集推荐）。\n"
+                                 "连接时自动下发；已连接可点「应用转速」在线调速")
+        self.rpm_spin.setMinimumWidth(55)
+        bar.addWidget(self.rpm_spin)
+        self.rpm_btn = QPushButton("应用转速")
+        self.rpm_btn.clicked.connect(self._apply_rpm)
+        bar.addWidget(self.rpm_btn)
 
         self.st = QLabel("● 未连接")
         self.st.setStyleSheet("color:#c0392b;font-weight:bold;padding:2px 8px")
@@ -420,12 +458,18 @@ class MainWindow(QMainWindow):
         port = self.port_cb.currentText()
         if not port or port == "(无)":
             return
-        self.reader = SerialReader(port, BAUD, self.parser)
+        self.reader = SerialReader(port, BAUD, self.parser, rpm=self.rpm_spin.value())
         if self.reader.start():
             self._set_ui(True, port)
         else:
             self.reader = None
             self.statusBar().showMessage(f"⚠ 打开 {port} 失败（可能被占用）", 4000)
+
+    def _apply_rpm(self):
+        if self.reader and self.reader.running:
+            ok = self.reader.set_rpm(self.rpm_spin.value())
+            msg = f"转速已设为 {self.rpm_spin.value()} RPM" if ok else "调速失败"
+            self.statusBar().showMessage(msg, 3000)
 
     def _set_ui(self, on, port=""):
         if on:

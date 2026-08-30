@@ -29,6 +29,9 @@
 import sys
 import math
 import time
+import json
+import os
+from datetime import datetime
 
 import numpy as np
 import serial
@@ -36,7 +39,7 @@ import serial.tools.list_ports
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QPushButton, QLabel, QDockWidget,
-                             QSpinBox)
+                             QSpinBox, QFileDialog)
 from PyQt5.QtCore import Qt, QTimer
 
 import matplotlib
@@ -284,6 +287,14 @@ class MergeWindow(fm.MainWindow):
         self.rng_spin.setSingleStep(100)
         self.rng_spin.setValue(4000)
         h2b.addWidget(self.rng_spin)
+        h2b.addWidget(QLabel("转速RPM"))
+        self.rpm_spin = QSpinBox()
+        self.rpm_spin.setRange(150, 900)
+        self.rpm_spin.setSingleStep(50)
+        self.rpm_spin.setValue(600)
+        self.rpm_spin.setToolTip("600=10Hz标准；300≈5Hz 每圈点数×2。\n"
+                                 "静止采集建议 300，圆柱点更多、检测更稳")
+        h2b.addWidget(self.rpm_spin)
         v.addLayout(h2b)
 
         # 采集 / 合并
@@ -299,6 +310,16 @@ class MergeWindow(fm.MainWindow):
         self.mg = QPushButton("合并分析 + 路径规划")
         self.mg.clicked.connect(self._merge_analyze)
         v.addWidget(self.mg)
+
+        # 保存 / 加载帧（离线重放调参数用）
+        h4 = QHBoxLayout()
+        self.svb = QPushButton("保存帧")
+        self.svb.clicked.connect(self._save_frames)
+        h4.addWidget(self.svb)
+        self.ldbtn = QPushButton("加载帧")
+        self.ldbtn.clicked.connect(self._load_frames)
+        h4.addWidget(self.ldbtn)
+        v.addLayout(h4)
 
         self.st = QLabel("未连接")
         self.st.setStyleSheet("color:#16a085;font-weight:bold")
@@ -370,7 +391,8 @@ class MergeWindow(fm.MainWindow):
         port = self.port_cb.currentText()
         if not port or port == "(无)":
             return
-        self.reader = lv.SerialReader(port, lv.BAUD, self.parser)
+        self.reader = lv.SerialReader(port, lv.BAUD, self.parser,
+                                      rpm=self.rpm_spin.value())
         if self.reader.start():
             self.cn.setText("断开")
             self.st.setText(f"已连接 {port}")
@@ -427,6 +449,77 @@ class MergeWindow(fm.MainWindow):
             self.st.setText(f"第2帧：原始 {len(raw)} 点，截取 {len(crop)} 点")
         else:
             self.st.setText("没采到数据，先连接雷达")
+
+    # ---------------- 帧存取（JSON，含全部采集参数，可离线重放调阈值） ----------------
+    def _write_frames(self, path):
+        data = {
+            "type": "lidar_merge_frames",
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "start": self.start_cb.currentText(),
+            "hdg_deg": self.hdg_spin.value(),
+            "rot_deg": self.rot_spin.value(),
+            "radar_off_mm": self.off_spin.value(),
+            "fov_deg": self.fov_spin.value(),
+            "max_range_mm": self.rng_spin.value(),
+            "rpm": self.rpm_spin.value(),
+            "frame1": self.frame1,      # [[angle_deg, dist_mm], ...] 原始帧
+            "frame2": self.frame2,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def _read_frames(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("type") != "lidar_merge_frames":
+            raise ValueError("不是本工具保存的雷达帧文件")
+        if not data.get("frame1") or not data.get("frame2"):
+            raise ValueError("文件里没有完整的两帧数据")
+        self.frame1 = [tuple(p) for p in data["frame1"]]
+        self.frame2 = [tuple(p) for p in data["frame2"]]
+        # 恢复采集时的参数（字段缺省则保留当前值）
+        if data.get("start"):
+            idx = self.start_cb.findText(data["start"])
+            if idx >= 0:
+                self.start_cb.setCurrentIndex(idx)
+        for key, spin in (("hdg_deg", self.hdg_spin), ("rot_deg", self.rot_spin),
+                          ("radar_off_mm", self.off_spin), ("fov_deg", self.fov_spin),
+                          ("max_range_mm", self.rng_spin), ("rpm", self.rpm_spin)):
+            if key in data:
+                spin.setValue(max(spin.minimum(), min(spin.maximum(), int(data[key]))))
+
+    def _save_frames(self):
+        if not self.frame1 or not self.frame2:
+            self.st.setText("没有可保存的帧，先采集两帧")
+            return
+        default = os.path.abspath(f"lidar_frames_{datetime.now():%Y%m%d_%H%M%S}.json")
+        path, _ = QFileDialog.getSaveFileName(self, "保存雷达帧", default,
+                                              "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._write_frames(path)
+            self.st.setText(f"已保存: {os.path.basename(path)}")
+        except Exception as e:
+            self.st.setText(f"保存失败: {e}")
+
+    def _load_frames(self):
+        path, _ = QFileDialog.getOpenFileName(self, "加载雷达帧", "",
+                                              "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._read_frames(path)
+        except Exception as e:
+            self.st.setText(f"加载失败: {e}")
+            return
+        c1 = self._crop_cur(self.frame1)
+        c2 = self._crop_cur(self.frame2)
+        self._draw_local(self.ax_f1, c1, f"第1帧截取 ({len(c1)}点)", "#16a34a")
+        self._draw_local(self.ax_f2, c2, f"第2帧截取 ({len(c2)}点)", "#d97706")
+        self.cloud_canvas.draw_idle()
+        self.st.setText(f"已加载: {os.path.basename(path)} · "
+                        f"参数一并恢复，可直接改视场/距离后合并")
 
     # ---------------- 合并 + 检测 + 规划 ----------------
     def _merge_analyze(self):
@@ -551,7 +644,21 @@ def _selftest():
     clouds = "selftest_clouds.png"
     win.cloud_fig.savefig(clouds, dpi=120)
     print(f"[自测] 三面板云图已保存: {clouds}")
-    return 0 if (matched == len(true_obs) and not false_pos) else 1
+
+    # ---- 帧存取往返测试 ----
+    n1, n2 = len(win.frame1), len(win.frame2)
+    tmp = "selftest_frames.json"
+    win._write_frames(tmp)
+    win.frame1, win.frame2 = None, None
+    win.fov_spin.setValue(180)          # 故意改乱，验证加载时参数恢复
+    win.hdg_spin.setValue(0)
+    win._read_frames(tmp)
+    ok_io = (len(win.frame1) == n1 and len(win.frame2) == n2
+             and win.fov_spin.value() == 160 and win.hdg_spin.value() == 180)
+    os.remove(tmp)
+    print(f"[自测] 帧存取往返: {'OK' if ok_io else 'X 失败'}"
+          f"（{n1}/{n2} 点, 参数恢复 视场{win.fov_spin.value()}°/车头{win.hdg_spin.value()}°）")
+    return 0 if (matched == len(true_obs) and not false_pos and ok_io) else 1
 
 
 def main():
