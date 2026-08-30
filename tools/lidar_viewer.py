@@ -79,6 +79,7 @@ class LidarParser:
     def reset(self):
         self.state = 0          # 0=找A5 1=找5A 2=跳应答头 3=节点
         self.hdr = 0
+        self._is_scan = False   # 应答类型：只有 0x81(扫描) 才进节点解析
         self.node = bytearray()
         self.rev = []           # 当前一圈的点
         self.completed = None   # 完整一圈（等主线程取走）
@@ -93,9 +94,12 @@ class LidarParser:
                 self.state = 2 if b == 0x5A else 0
                 self.hdr = 0
             elif self.state == 2:
+                if self.hdr == 4:
+                    self._is_scan = (b == 0x81)  # 第5字节=类型：0x81 才是扫描应答
                 self.hdr += 1
                 if self.hdr >= 5:            # 跳过 len(4)+type(1)
-                    self.state = 3
+                    # 调速等控制命令的应答直接丢弃，否则会带偏节点解析 → 点云全无
+                    self.state = 3 if self._is_scan else 0
                     self.node = bytearray()
             elif self.state == 3:
                 self.node.append(b)
@@ -155,11 +159,15 @@ class SerialReader:
             pass
         # 设置电机转速（协议 MOTOR_SPEED_CTRL：A5 A8 02 + RPM 小端16位）
         # C1 闭环电机，掉速自动补偿；转速越低每圈点数越多（5000点/s 固定）
+        # rpm=0 → 不发命令（行为与旧版完全一致，兜底用）
         if self.rpm:
             try:
                 self.ser.write(b"\xA5\xA8\x02" + struct.pack("<H", int(self.rpm)))
-                time.sleep(0.05)                # 等响应描述符到达
-                self.ser.reset_input_buffer()   # 丢弃应答，别喂进解析器
+                # 等应答描述符(7字节)真正到达再清缓冲，清早了残留字节会破坏解析
+                deadline = time.time() + 0.5
+                while time.time() < deadline and self.ser.in_waiting < 7:
+                    time.sleep(0.01)
+                self.ser.reset_input_buffer()
             except Exception:
                 pass
         # 发 SCAN 命令（A5 20，无校验）
@@ -297,10 +305,12 @@ class MainWindow(QMainWindow):
         bar.addSpacing(6)
         bar.addWidget(QLabel("转速RPM:"))
         self.rpm_spin = QSpinBox()
-        self.rpm_spin.setRange(150, 900)
+        self.rpm_spin.setRange(0, 900)
         self.rpm_spin.setSingleStep(50)
         self.rpm_spin.setValue(DEFAULT_RPM)
+        self.rpm_spin.setSpecialValueText("不调速")
         self.rpm_spin.setToolTip("600=10Hz标准；300≈5Hz，每圈点数×2（静止采集推荐）。\n"
+                                 "0=不发调速命令（旧行为，调速异常时选这个）。\n"
                                  "连接时自动下发；已连接可点「应用转速」在线调速")
         self.rpm_spin.setMinimumWidth(55)
         bar.addWidget(self.rpm_spin)

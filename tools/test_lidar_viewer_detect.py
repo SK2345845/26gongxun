@@ -49,7 +49,28 @@ class FakeReader:
         return f
 
 
+def test_parser():
+    """调速应答描述符不能破坏扫描解析（点云全无 bug 的回归测试）"""
+    p = lv.LidarParser()
+    # 伪造字节流：调速应答(7字节,类型0xA8) + 扫描应答头(类型0x81) + 3个测距节点
+    # 节点格式: [S|~S|quality<<2, angle_l, angle_h, dist_l, dist_h]
+    # 角度16位 = (度*64)<<1（最低位是校验位S）；距离16位 = mm*4
+    stream = bytes([
+        0xA5, 0x5A, 0x00, 0x00, 0x00, 0xA8, 0x85,   # 调速应答——必须被丢弃
+        0xA5, 0x5A, 0x05, 0x00, 0x00, 0x40, 0x81,   # 扫描应答头
+        0xF1, 0x80, 0x16, 0xA0, 0x0F,               # S=1 新圈: 45°, 1000mm
+        0x02, 0x00, 0x2D, 0xD0, 0x07,               # S=0:      90°, 500mm
+        0xF1, 0x80, 0x43, 0xE8, 0x03,               # S=1: 上一圈完成, 135°, 250mm
+    ])
+    p.feed(stream)
+    rev = p.take_completed()
+    ok = rev == [(45.0, 1000.0), (90.0, 500.0)]
+    print(f"[测试] 解析器: {'OK ' if ok else 'X '}{rev}")
+    return 0 if ok else 1
+
+
 def main():
+    rc = test_parser()
     app = QApplication(sys.argv)
     w = lv.MainWindow()
 
@@ -94,7 +115,7 @@ def main():
         ok = False
         print("[测试] X 置信度没起来")
     print("[测试] OK 通过" if ok else "[测试] X 失败")
-    return 0 if ok else 1
+    return 0 if (ok and rc == 0) else 1
 
 
 if __name__ == "__main__":

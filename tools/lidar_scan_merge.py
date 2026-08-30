@@ -289,11 +289,13 @@ class MergeWindow(fm.MainWindow):
         h2b.addWidget(self.rng_spin)
         h2b.addWidget(QLabel("转速RPM"))
         self.rpm_spin = QSpinBox()
-        self.rpm_spin.setRange(150, 900)
+        self.rpm_spin.setRange(0, 900)
         self.rpm_spin.setSingleStep(50)
         self.rpm_spin.setValue(600)
+        self.rpm_spin.setSpecialValueText("不调速")
         self.rpm_spin.setToolTip("600=10Hz标准；300≈5Hz 每圈点数×2。\n"
-                                 "静止采集建议 300，圆柱点更多、检测更稳")
+                                 "静止采集建议 300，圆柱点更多、检测更稳。\n"
+                                 "0=不发调速命令（旧行为，调速异常时选这个）")
         h2b.addWidget(self.rpm_spin)
         v.addLayout(h2b)
 
