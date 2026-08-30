@@ -85,6 +85,8 @@ EXCLUDE_MARGIN = 40.0     # 过滤固定设施时的外扩余量 (mm)
 DBSCAN_EPS = 80.0         # 聚类邻域半径 (mm)，小于两个障碍的最小间距即可
 DBSCAN_MIN_PTS = 2        # 成簇最少点数：场内即障碍（宁多勿漏），单点毛刺扔掉
 MIN_VIEW_PTS = 2          # 双视角确认：每个障碍在两个视角各至少几个支撑点
+DBSCAN_SPLIT_EPS = 45.0   # 大簇二次拆分邻域 (mm)：障碍挨着别的回波被链式吞掉时，
+                          # 拆出紧凑子簇保留；真墙点距密，拆完仍是大条 → 照样扔
 MAX_CLUSTER_EXTENT = 300.0  # 簇最大外接尺寸 (mm)：φ50 障碍 + 噪声余量；
                             # 超过判为墙/长条设施，丢弃（否则墙心会出假障碍）
 # 视场角（160°/180° 不确定）与最大扫描距离在 GUI 上调，见 _build_radar_dock
@@ -153,7 +155,10 @@ def is_excluded(wx, wy):
 
 
 def dbscan(points, eps, min_pts):
-    """极简 DBSCAN，返回 [(cx, cy, n, extent), ...]（簇中心 + 点数 + 外接尺寸 mm）"""
+    """极简 DBSCAN，返回 [(cx, cy, n, extent, members), ...]
+
+    members = [(x, y), ...] 簇成员点（供大簇二次拆分用）
+    """
     pts = np.asarray(points, dtype=float)
     n = len(pts)
     if n == 0:
@@ -191,20 +196,33 @@ def dbscan(points, eps, min_pts):
         out.append((float(sub[:, 0].mean()),
                     float(sub[:, 1].mean()),
                     int(len(idx)),
-                    extent))
+                    extent,
+                    [(float(x), float(y)) for x, y in sub]))
     return out
 
 
 def detect_obstacles(world_points):
     """世界坐标点列表 → 障碍中心列表 [(x, y), ...]
 
-    三层过滤：固定设施/场外掩膜 → DBSCAN 聚类 → 簇尺寸判墙。
+    过滤链：固定设施/场外掩膜 → DBSCAN 聚类 → 簇尺寸判墙（大簇二次拆分）。
     场外不用距离门限（对角线可达 3.4m，门限会误杀场内点），
     统一转世界坐标后按场地矩形做几何裁剪。
     """
     keep = [(x, y) for x, y in world_points if not is_excluded(x, y)]
     clusters = dbscan(keep, DBSCAN_EPS, DBSCAN_MIN_PTS)
-    return [(cx, cy) for cx, cy, _, ext in clusters if ext <= MAX_CLUSTER_EXTENT]
+    out = []
+    for cx, cy, _, ext, members in clusters:
+        if ext <= MAX_CLUSTER_EXTENT:
+            out.append((cx, cy))
+            continue
+        # 大簇不整团扔：障碍挨着别的回波会被链式聚类吞掉（实测 25 点真障碍簇
+        # 被连坐误扔）。用更小邻域二次拆分，紧凑子簇照样算障碍；
+        # 真墙点距密、拆完仍是大条 → 照样扔
+        for sx, sy, sn, sext, _ in dbscan(members, DBSCAN_SPLIT_EPS,
+                                          DBSCAN_MIN_PTS):
+            if sext <= MAX_CLUSTER_EXTENT:
+                out.append((sx, sy))
+    return out
 
 
 def scan_ports():
