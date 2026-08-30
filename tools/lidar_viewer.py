@@ -60,7 +60,7 @@ MIN_OBSTACLE_POINTS = 2     # 一个障碍至少几个点，否则算噪声（φ
 OBSTACLE_ANGLE_GAP = 3.0    # 相邻点角度差 >此值(°) → 不同障碍
 # ---- 障碍判别（φ50 圆柱专用，替代纯点数置信度）----
 CLUSTER_MAX_EXTENT = 150.0  # 簇最大外接尺寸 (mm)：圆柱≈50mm，墙碎片几百mm → 直接扔
-EXPECTED_PTS_1M = 6.0       # φ50 圆柱在 1m 处的期望点数（按角分辨率估算，可实测校准）
+EXPECTED_PTS_1M = 3.0       # φ50 圆柱在 1m 处的期望点数（实测校准：1m 处约 2-3 点）
 PERSIST_FRAMES = 5          # 位置持续性窗口：最近 N 帧里同位置反复出现 → 稳定障碍
 MATCH_RADIUS_MM = 120.0     # 跨帧配同一障碍的位置容差 (mm)
 MIN_CONFIDENCE = 60         # 置信度低于此值不显示（但照样计入持续性窗口攒分）
