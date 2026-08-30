@@ -247,7 +247,10 @@ class MergeWindow(fm.MainWindow):
         self.parser = lv.LidarParser()
         self.frame1 = None          # 第 1 帧原始点 [(a, d)]（未裁剪）
         self.frame2 = None          # 第 2 帧原始点 [(a, d)]（未裁剪）
+        self.frame1_pose = None     # 第1帧采集时的基准位姿 {start,hdg,off}
+        self.frame2_pose = None     # 第2帧同上——支持两个点位各采一帧
         self.merged_cloud = []      # 合并后的世界坐标点（画图用）
+        self.obstacle_info = []     # [(cx, cy, 视角1点数, 视角2点数)]
         self._build_radar_dock()
         self._build_cloud_dock()
         # 实时云图刷新（连上雷达后每 200ms 重画左 panel）
@@ -469,6 +472,18 @@ class MergeWindow(fm.MainWindow):
         """按当前 GUI 的视场角/最大距离裁剪原始帧"""
         return crop_points(raw, self.fov_spin.value(), self.rng_spin.value())
 
+    def _cur_pose(self):
+        """当前 GUI 参数作为一帧的采集位姿"""
+        return {"start": self.start_cb.currentText(),
+                "hdg": self.hdg_spin.value(),
+                "off": self.off_spin.value()}
+
+    @staticmethod
+    def _pose_base(pose):
+        """位姿里的起点文字 → 场地坐标"""
+        node = "S1" if pose.get("start") == "启停区一" else "S2"
+        return fm.NODES[node]
+
     def _capture_multi(self):
         """连采 N 圈做聚合滤波（毛刺剔除+中值），返回 (帧, 实际圈数)"""
         n = self.cnt_spin.value()
@@ -487,11 +502,13 @@ class MergeWindow(fm.MainWindow):
         if res:
             raw, nrev = res
             self.frame1 = raw           # 存聚合后的帧，改裁剪参数后合并时重新截取
+            self.frame1_pose = self._cur_pose()   # 记住这是在哪、朝哪采的
             crop = self._crop_cur(raw)
             self._draw_local(self.ax_f1, crop,
                              f"第1帧截取 ({len(crop)}点)", "#16a34a")
             self.cloud_canvas.draw_idle()
-            self.st.setText(f"第1帧：{nrev} 圈聚合 {len(raw)} 点，截取 {len(crop)} 点")
+            self.st.setText(f"第1帧：{nrev} 圈聚合 {len(raw)} 点，截取 {len(crop)} 点"
+                            f" · 基准 {self.frame1_pose['start']} 车头{self.frame1_pose['hdg']}°")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
@@ -500,11 +517,13 @@ class MergeWindow(fm.MainWindow):
         if res:
             raw, nrev = res
             self.frame2 = raw
+            self.frame2_pose = self._cur_pose()
             crop = self._crop_cur(raw)
             self._draw_local(self.ax_f2, crop,
                              f"第2帧截取 ({len(crop)}点)", "#d97706")
             self.cloud_canvas.draw_idle()
-            self.st.setText(f"第2帧：{nrev} 圈聚合 {len(raw)} 点，截取 {len(crop)} 点")
+            self.st.setText(f"第2帧：{nrev} 圈聚合 {len(raw)} 点，截取 {len(crop)} 点"
+                            f" · 基准 {self.frame2_pose['start']} 车头{self.frame2_pose['hdg']}°")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
@@ -522,6 +541,8 @@ class MergeWindow(fm.MainWindow):
             "rpm": self.rpm_spin.value(),
             "frame1": self.frame1,      # [[angle_deg, dist_mm], ...] 原始帧
             "frame2": self.frame2,
+            "frame1_pose": self.frame1_pose,    # 各帧采集时的基准位姿
+            "frame2_pose": self.frame2_pose,
         }
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False)
@@ -535,6 +556,8 @@ class MergeWindow(fm.MainWindow):
             raise ValueError("文件里没有完整的两帧数据")
         self.frame1 = [tuple(p) for p in data["frame1"]]
         self.frame2 = [tuple(p) for p in data["frame2"]]
+        self.frame1_pose = data.get("frame1_pose") or self._cur_pose()
+        self.frame2_pose = data.get("frame2_pose") or self._cur_pose()
         # 恢复采集时的参数（字段缺省则保留当前值）
         if data.get("start"):
             idx = self.start_cb.findText(data["start"])
@@ -585,18 +608,24 @@ class MergeWindow(fm.MainWindow):
             self.st.setText("请先采集两帧")
             return
 
-        self._go()                       # 按左侧选择 S1/S2 落位
-        xc, yc = self.robot
-        h1 = float(self.hdg_spin.value())
-        rot = float(self.rot_spin.value())
-        off = float(self.off_spin.value())
-        h2 = h1 + rot
+        # 每帧用各自采集时的基准位姿：既支持原地转90°，也支持两点位各采一帧
+        # （开过去采的第二帧如果还用同一基准，障碍会被平移出误检——实测踩过的坑）
+        p1 = self.frame1_pose or self._cur_pose()
+        p2 = self.frame2_pose or self._cur_pose()
+        base1 = self._pose_base(p1)
+        base2 = self._pose_base(p2)
+        xc, yc = base2                      # 车体标记画在第2帧基准位（最后一次发车）
+        h1 = float(p1["hdg"])
+        h2 = float(p2["hdg"])
 
         f1 = self._crop_cur(self.frame1)  # 用当前视场角/最大距离重新截取
         f2 = self._crop_cur(self.frame2)
-        w1 = radar_to_world(f1, xc, yc, h1, off)
-        w2 = radar_to_world(f2, xc, yc, h2, off)
+        w1 = radar_to_world(f1, base1[0], base1[1], h1, float(p1["off"]))
+        w2 = radar_to_world(f2, base2[0], base2[1], h2, float(p2["off"]))
         self.merged_cloud = w1 + w2
+
+        print(f"[合并] 第1帧基准 {p1['start']}·车头{h1:.0f}° | "
+              f"第2帧基准 {p2['start']}·车头{h2:.0f}°")
 
         self.obstacles = detect_obstacles(self.merged_cloud)
 
@@ -627,7 +656,8 @@ class MergeWindow(fm.MainWindow):
               f"合并 {len(self.merged_cloud)} 点, 最终 {len(self.obstacles)} 个障碍")
 
         self.st.setText(f"障碍 {len(self.obstacles)} 个 · 视场 {self.fov_spin.value()}°"
-                        f" · {self.rng_spin.value()}mm · 车头 {h1}°/转角 {rot}°")
+                        f" · {self.rng_spin.value()}mm · 基准 {p1['start']}{h1:.0f}°/"
+                        f"{p2['start']}{h2:.0f}°")
         self.robot_st.setText(f"状态: 检测到 {len(self.obstacles)} 个障碍，规划默认任务")
         self._default_task()             # 用检测到的障碍跑 A*，画出路径
 
@@ -708,6 +738,8 @@ def _selftest():
 
     win.frame1 = to_polar(world, 180.0)         # 存原始帧（GUI 用当前参数截取）
     win.frame2 = to_polar(world, 270.0)
+    win.frame1_pose = {"start": "启停区一", "hdg": 180, "off": 150}
+    win.frame2_pose = {"start": "启停区一", "hdg": 270, "off": 150}  # 原地转90°
     win._merge_analyze()
 
     # ---- 核对 ----
