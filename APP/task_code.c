@@ -128,20 +128,6 @@ const TaskPlan_t *TaskCode_Current(void)
         return &s_plan;
 }
 
-const char *TaskCode_ColorName(uint8_t color)
-{
-        switch (color)
-        {
-        case TASK_COLOR_RED:    return "红";
-        case TASK_COLOR_YELLOW: return "黄";
-        case TASK_COLOR_BLUE:   return "蓝";
-        case TASK_COLOR_GREEN:  return "绿";
-        case TASK_COLOR_BLACK:  return "黑";
-        case TASK_COLOR_LBLUE:  return "浅蓝";
-        default:                return "?";
-        }
-}
-
 uint8_t TaskCode_ColorIndex(uint8_t color)
 {
         if (color < TASK_COLOR_MIN || color > TASK_COLOR_MAX) { return 0xFFU; }
@@ -189,8 +175,8 @@ void TaskCode_FormatBrief(const TaskPlan_t *plan, char *buf, uint16_t size)
         for (i = 0; i < TASK_BATCH_N; i++)
         {
                 if (i > 0U) { append_str(&pos, buf, size, " "); }
-                append_str(&pos, buf, size, TaskCode_ColorName(plan->b1_color[i]));
-                append_str(&pos, buf, size, ">环");
+                append_num(&pos, buf, size, plan->b1_color[i]);   /* 颜色编号 */
+                append_str(&pos, buf, size, ">");
                 append_num(&pos, buf, size, plan->b1_ring[i]);
         }
 
@@ -199,8 +185,8 @@ void TaskCode_FormatBrief(const TaskPlan_t *plan, char *buf, uint16_t size)
         for (i = 0; i < TASK_BATCH_N; i++)
         {
                 if (i > 0U) { append_str(&pos, buf, size, " "); }
-                append_str(&pos, buf, size, TaskCode_ColorName(plan->b2_color[i]));
-                append_str(&pos, buf, size, ">环");
+                append_num(&pos, buf, size, plan->b2_color[i]);   /* 颜色编号 */
+                append_str(&pos, buf, size, ">");
                 append_num(&pos, buf, size, plan->b2_ring[i]);
         }
 }

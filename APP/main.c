@@ -30,6 +30,14 @@ static void Scanner_TaskCode_Poll(void)
 
         while (Scanner_GetCode(&code))
         {
+                /* 调试：扫到内容显示到当前页 t1（屏须停在 page5；跨页写需 vscope=全局，故不用） */
+                HMI_SetText("t1", code.code);
+
+                /* 同步在 debug 串口(USART1)打印扫到的原始串 */
+                usart1_SendString("[SCAN] ");
+                usart1_SendString(code.code);
+                usart1_SendString("\r\n");
+
                 if (code.len == (TASK_RAW_MAX - 1) &&
                     strcmp(code.code, last_raw) == 0 &&
                     (code.tick - last_tick) < pdMS_TO_TICKS(2000))
@@ -42,7 +50,7 @@ static void Scanner_TaskCode_Poll(void)
                         strcpy(last_raw, code.code);
                         last_tick = code.tick;
                         HMI_Menu_NotifyCode(code.code, 1);
-                        usart1_SendString("[TASK] 任务码已入库: ");
+                        usart1_SendString("[TASK] task code accepted: ");
                         usart1_SendString(code.code);
                         usart1_SendString("\r\n");
                         TaskCode_FormatBrief(TaskCode_Current(), brief, sizeof(brief));
@@ -53,7 +61,7 @@ static void Scanner_TaskCode_Poll(void)
                 else
                 {
                         HMI_Menu_NotifyCode(code.code, 0);
-                        usart1_SendString("[TASK] 无效任务码(不覆盖): ");
+                        usart1_SendString("[TASK] invalid code (keep old): ");
                         usart1_SendString(code.code);
                         usart1_SendString("\r\n");
                 }
@@ -68,62 +76,41 @@ static void Scanner_TaskCode_Poll(void)
         */
 void User_Sequential_Logic(void)
 {
+        uint32_t last_trigger = 0;
+
         // 1. 上电稳定等待 500ms（非阻塞释放 CPU）
         vTaskDelay(pdMS_TO_TICKS(500));
 
-        // 2. 【底盘调试模式】仅运行底盘遥控任务，其它任务暂时停用
-        usart1_SendString("[REMOTE] chassis-only debug mode\r\n");
-        usart1_SendString("[REMOTE] WASD move, E/R rotate, +/- speed, X stop\r\n");
-        usart1_SendString("[REMOTE] press 'p' to probe/spin drivers 1-4\r\n");
-        usart1_SendString("[REMOTE] waiting 2.5s for drivers ready...\r\n");
+        // 2. 【扫码+串口屏调试模式】只跑扫码与串口屏，底盘/机械臂/雷达等其它任务暂时停用
+        usart1_SendString("[SCAN] scanner + HMI debug mode\r\n");
 
-        // 3. 【关键】等待张大头驱动器完成自身初始化。
-        //    驱动器冷启动需要 1~2 秒，期间收到的指令（含使能）会被直接吞掉。
-        //    之前"断电重启后小车失灵"的头号嫌疑就是 STM32 在 500ms 就使能，
-        //    而驱动器还没就绪。此处等足 2.5 秒，并补发一次使能兜底。
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        Chassis_Remote_Enable();
-        vTaskDelay(pdMS_TO_TICKS(500));
-        Chassis_Remote_Enable();
-
-        // 4. 关闭USART1接收中断（该硬件上RXNE中断不触发），改用轮询读取
-        Chassis_Remote_RxProbe_Begin();
-
-        // 5. 主循环：轮询读取USART1并驱动底盘。收到 w 会回显 [REMOTE] cmd=w，
-        //    并向USART3发送速度指令。若回显有、车不动 → 问题在电机侧(USART3/驱动器)。
-        //    串口屏（USART2）同步挂上：主菜单/任务页/扫码页/遥控页可用，
-        //    遥控页方向键「按住走、松开停」，与 USART1 遥控并存。
-        HMI_Menu_Init();
-        while(1)
-        {
-                Chassis_Remote_Process();
-                HMI_Menu_Process();   // 事件分发 + 周期刷新（内部自带 200ms 节流）
-                vTaskDelay(pdMS_TO_TICKS(2));
-        }
-
-        /* ===== 以下为机械臂/扫码/雷达任务，底盘调试期间暂时停用，调好后可恢复 =====
         Scanner_Init();
         TaskCode_Init();
-        Lidar_Init();
-        uint32_t sent_lidar_rev = 0;
+
+        // 3. 等串口屏上电启动完成再发 HMI 指令：TJC 屏上电约需 1~2s，期间命令会被丢弃
+        vTaskDelay(pdMS_TO_TICKS(2000));
+
+        // 4. 显式设置扫描模式（参考 Gongchuang_27_Experiment/app_tasks.c，原来漏了这步）。
+        //    TRIGGER(0x99)=命令触发、扫一次算一次；CONTINUOUS(0x22)=一直扫。
+        //    调试期用 TRIGGER，配合下面每 2s 自动触发，确认命令链路与模块都正常。
+        Scanner_SetModeRuntime(SCANNER_MODE_TRIGGER);
+
+        HMI_Menu_Init();
+
         while(1)
         {
-                Arm_Lift_Debug_Process();
-                Scanner_Process();
-                Scanner_TaskCode_Poll();   // 扫码 → 任务码解析入库（去重）
-                Lidar_Process();
+                // 调试期：每 2s 自动触发一次扫码（脱离人手；改用 CONTINUOUS 时删掉这段）
+                if ((xTaskGetTickCount() - last_trigger) >= pdMS_TO_TICKS(2000))
                 {
-                        LidarPoint_t *points;
-                        uint16_t count = Lidar_GetScan(&points);
-                        if(count > 0 && Lidar_GetRevCount() != sent_lidar_rev)
-                        {
-                                sent_lidar_rev = Lidar_GetRevCount();
-                                LidarLink_SendScan(points, count, sent_lidar_rev);
-                        }
+                        last_trigger = xTaskGetTickCount();
+                        Scanner_Trigger();
                 }
+
+                Scanner_Process();          /* 解析 GM65 上报字节 → 码队列 */
+                Scanner_TaskCode_Poll();    /* 出队：屏 page5.t1 + 解析入库 + debug 打印 */
+                HMI_Menu_Process();         /* 屏触摸事件分发 + 当前页周期刷新 */
                 vTaskDelay(pdMS_TO_TICKS(20));
         }
-        ========================================================================= */
 }
 
 /**

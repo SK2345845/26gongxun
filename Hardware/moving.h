@@ -16,6 +16,9 @@
 #define REMOTE_MOVE_VEL_MIN     20
 #define REMOTE_MOVE_VEL_MAX     1000
 #define REMOTE_MOVE_VEL_STEP    20
+/* 位置模式（定距离移动）默认速度/加速度，跑图调参改这里 */
+#define REMOTE_POS_VEL          100
+#define REMOTE_POS_ACC          100
 
 extern TaskHandle_t MovingTask_Handler;
 
@@ -29,6 +32,9 @@ void Moving_Task_Create(void);
 **********************************************************/
 // 底盘前进（4电机多机同步位置运动）
 void move_qian(uint32_t pulse);
+
+// 位置模式定距移动：dir=w/a/s/d/e/r/q/z/c/v，pulse=脉冲数（16细分下 3200=1圈）
+void Chassis_Remote_Move(char dir, uint32_t pulse);
 
 // USART1遥控：w/a/s/d前后左右，e/r顺逆时针，x停止
 void Chassis_Remote_Command(char command);

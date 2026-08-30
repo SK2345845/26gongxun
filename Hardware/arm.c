@@ -290,7 +290,7 @@ void Arm_Base_Origin_Return(void)
  */
 void Arm_Lift_One_Turn_Test(void)
 {
-	usart1_SendString("[ARM] 7号丝杆单圈测试开始\r\n");
+	usart1_SendString("[ARM] screw7 one-turn test start\r\n");
 	Emm_V5_En_Control(ARM_LIFT_MOTOR, true, false);
 	vTaskDelay(pdMS_TO_TICKS(10));
 
@@ -299,7 +299,7 @@ void Arm_Lift_One_Turn_Test(void)
 	                   ARM_LIFT_MOVE_VEL, ARM_LIFT_MOVE_ACC,
 	                   ARM_LIFT_ONE_TURN_PULSE, false, false);
 	vTaskDelay(pdMS_TO_TICKS(3000));
-	usart1_SendString("[ARM] 7号丝杆单圈测试完成\r\n");
+	usart1_SendString("[ARM] screw7 one-turn test done\r\n");
 }
 
 /**

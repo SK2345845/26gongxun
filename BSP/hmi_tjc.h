@@ -2,7 +2,7 @@
  * @file    hmi_tjc.h
  * @brief   淘晶驰 TJC 串口屏驱动（移植自 Gongchuang_27 暑期工程）
  *
- * 串口：USART2  PA2(TX) / PA3(RX)，9600 8N1
+ * 串口：USART2  PA2(TX) / PA3(RX)，115200 8N1
  *
  * 两条数据流：
  *   屏→MCU（触摸）：0x65 <页ID> <控件ID> <1按下/0松开> FF FF FF → 事件队列

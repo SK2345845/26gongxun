@@ -63,6 +63,24 @@ static void chassis_remote_velocity(uint8_t dir1, uint8_t dir2,
         }
 }
 
+/* 斜向移动：dirs[i]=方向位，on[i]=1 该轮出力、0 该轮给 0 速度。
+ * 45° 斜向用「对角两轮出力、另两轮停」拼合（mecanum 对角分解），
+ * 帧间同样留 8ms 处理间隔。 */
+static void chassis_remote_velocity4(const uint8_t dirs[4], const uint8_t on[4])
+{
+        uint8_t i, addr;
+
+        for(i = 0; i < 4; i++)
+        {
+                addr = (uint8_t)(i + 1);
+                Emm_V5_En_Control(addr, true, false);
+                vTaskDelay(pdMS_TO_TICKS(8));
+                Emm_V5_Vel_Control(addr, dirs[i], on[i] ? remote_move_vel : 0,
+                                   REMOTE_MOVE_ACC, false);
+                vTaskDelay(pdMS_TO_TICKS(8));
+        }
+}
+
 void Chassis_Remote_Stop(void)
 {
         uint8_t i;
@@ -103,6 +121,13 @@ void Chassis_Remote_Command(char command)
                 case 'd': chassis_remote_velocity(1, 1, 0, 0); break;
                 case 'e': chassis_remote_velocity(0, 0, 0, 0); break;
                 case 'r': chassis_remote_velocity(1, 1, 1, 1); break;
+                /* 斜向 45°（方向位表按下述对角推导，若实测方向反/偏，调这里）：
+                 *   前左 q: 轮1 CW + 轮4 CCW        前右 c: 轮2 CCW + 轮3 CW
+                 *   后左 z: 轮2 CW + 轮3 CCW        后右 v: 轮1 CCW + 轮4 CW   */
+                case 'q': { uint8_t d[4] = {0, 0, 0, 1}; uint8_t o[4] = {1, 0, 0, 1}; chassis_remote_velocity4(d, o); break; }
+                case 'c': { uint8_t d[4] = {0, 1, 0, 0}; uint8_t o[4] = {0, 1, 1, 0}; chassis_remote_velocity4(d, o); break; }
+                case 'z': { uint8_t d[4] = {0, 0, 1, 0}; uint8_t o[4] = {0, 1, 1, 0}; chassis_remote_velocity4(d, o); break; }
+                case 'v': { uint8_t d[4] = {1, 0, 0, 0}; uint8_t o[4] = {1, 0, 0, 1}; chassis_remote_velocity4(d, o); break; }
                 case 'x': Chassis_Remote_Stop(); break;
                 default: break;
         }
@@ -149,7 +174,8 @@ void Chassis_Remote_Process(void)
                         continue;
                 }
                 if(data == 'w' || data == 'a' || data == 's' || data == 'd' ||
-                   data == 'e' || data == 'r' || data == 'x')
+                   data == 'e' || data == 'r' || data == 'x' ||
+                   data == 'q' || data == 'c' || data == 'z' || data == 'v')
                 {
                         Chassis_Remote_Command((char)data);
                         // 回显，证明USART1确实收到并已分发该指令。
@@ -168,7 +194,6 @@ void Chassis_Remote_Process(void)
                 {
                         if(len == 0) { continue; }
                         line[len] = '\0';
-                        len = 0;
                         if(line[0] == '+' && line[1] == '\0')
                         {
                                 Chassis_Remote_SpeedAdjust(1);
@@ -179,6 +204,23 @@ void Chassis_Remote_Process(void)
                                 Chassis_Remote_SpeedAdjust(-1);
                                 usart1_SendString("[REMOTE] speed -\r\n");
                         }
+                        else if(line[0] == 'M' && len >= 3 && line[2] == ' ')
+                        {
+                                /* 位置模式定距移动：M<dir> <pulses>，如 "Mw 3200" */
+                                uint8_t k = 3;
+                                uint32_t mpulse = 0;
+                                char mdir = line[1];
+                                while(k < len && line[k] >= '0' && line[k] <= '9')
+                                {
+                                        mpulse = mpulse * 10U + (uint32_t)(line[k] - '0');
+                                        k++;
+                                }
+                                if(mpulse > 0)
+                                {
+                                        Chassis_Remote_Move(mdir, mpulse);
+                                }
+                        }
+                        len = 0;
                         continue;
                 }
                 if(len < sizeof(line) - 1 && data >= 0x20 && data <= 0x7E)
@@ -473,4 +515,67 @@ void zhuan_ni(uint32_t pulse)
         // 广播地址 0 触发 4 台电机同时开始运动
         Emm_V5_Synchronous_motion(0);
         vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+/* 位置模式定距移动：dirs[]=方向位，on[]=1 该轮走 pulse 脉冲、0 该轮不动（斜向用） */
+static void chassis_pos4(const uint8_t dirs[4], const uint8_t on[4], uint32_t pulse)
+{
+        uint8_t i, addr;
+
+        for(i = 0; i < 4; i++)
+        {
+                if(!on[i]) { continue; }
+                addr = (uint8_t)(i + 1);
+                Emm_V5_Pos_Control(addr, dirs[i], REMOTE_POS_VEL, REMOTE_POS_ACC,
+                                   pulse, 0, 1);
+                vTaskDelay(pdMS_TO_TICKS(10));
+        }
+        Emm_V5_Synchronous_motion(0);           /* 广播触发，多机同步起步 */
+        vTaskDelay(pdMS_TO_TICKS(10));
+}
+
+/* 斜向位置移动（前6个参数依次为4轮方向位 + 4轮使能位） */
+static void chassis_move_diag(uint8_t d1, uint8_t d2, uint8_t d3, uint8_t d4,
+                              uint8_t o1, uint8_t o2, uint8_t o3, uint8_t o4,
+                              uint32_t pulse)
+{
+        uint8_t d[4] = {d1, d2, d3, d4};
+        uint8_t o[4] = {o1, o2, o3, o4};
+        chassis_pos4(d, o, pulse);
+}
+
+/* 十进制打印（无 stdio） */
+static void print_dec_u32(uint32_t v)
+{
+        char buf[11];
+        uint8_t k = 0;
+
+        if(v == 0) { usart1_SendByte('0'); return; }
+        while(v > 0) { buf[k++] = (char)('0' + (v % 10U)); v /= 10U; }
+        while(k > 0) { usart1_SendByte((uint16_t)buf[--k]); }
+}
+
+/* 位置模式定距移动分发：dir=w/a/s/d/e/r(正交/旋转) 或 q/z/c/v(斜向) */
+void Chassis_Remote_Move(char dir, uint32_t pulse)
+{
+        switch(dir)
+        {
+                case 'w': move_qian(pulse); break;
+                case 's': move_hou(pulse); break;
+                case 'a': move_zuo(pulse); break;
+                case 'd': move_you(pulse); break;
+                case 'e': zhuan_shun(pulse); break;
+                case 'r': zhuan_ni(pulse); break;
+                case 'q': chassis_move_diag(0, 0, 0, 1, 1, 0, 0, 1, pulse); break;  /* 前左 */
+                case 'c': chassis_move_diag(0, 1, 0, 0, 0, 1, 1, 0, pulse); break;  /* 前右 */
+                case 'z': chassis_move_diag(0, 0, 1, 0, 0, 1, 1, 0, pulse); break;  /* 后左 */
+                case 'v': chassis_move_diag(1, 0, 0, 0, 1, 0, 0, 1, pulse); break;  /* 后右 */
+                default: return;
+        }
+
+        usart1_SendString("[MOVE] dir=");
+        usart1_SendByte((uint16_t)dir);
+        usart1_SendString(" pulse=");
+        print_dec_u32(pulse);
+        usart1_SendString("\r\n");
 }

@@ -20,6 +20,13 @@ PRJ/*.uvguix.*
 .idea/
 *.code-workspace
 
+# 字库文件（生成产物，不入库）
+ziku/
+
+# Python 缓存
+__pycache__/
+*.pyc
+
 # 系统
 .DS_Store
 Thumbs.db

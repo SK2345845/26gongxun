@@ -69,15 +69,12 @@ uint8_t TaskCode_IsValid(void);
 /* 取当前任务只读指针（未入库时 valid=0）；串口屏/搬运任务从此读 */
 const TaskPlan_t *TaskCode_Current(void);
 
-/* 颜色编号 → 中文名（UTF-8；"浅蓝"两字）。非法编号返回 "?" */
-const char *TaskCode_ColorName(uint8_t color);
-
 /* 颜色编号 → HMI/串口屏用索引（0~5，顺序 红 黄 蓝 绿 黑 浅蓝），非法返回 0xFF */
 uint8_t TaskCode_ColorIndex(uint8_t color);
 
 /* 生成供串口屏/调试的摘要串，如：
- * "156+123+516+231|B1 红>环1 黑>环2 浅蓝>环3|B2 黑>环2 红>环3 浅蓝>环1"
- * buf 至少 96 字节，size 为缓冲大小，始终 '\0' 结尾 */
+ * "156+123+516+231|B1 1>1 5>2 6>3|B2 5>2 1>3 6>1"
+ * 颜色与圆环都用编号数字表示；buf 至少 96 字节，size 为缓冲大小，始终 '\0' 结尾 */
 void    TaskCode_FormatBrief(const TaskPlan_t *plan, char *buf, uint16_t size);
 
 #endif /* __TASK_CODE_H */
