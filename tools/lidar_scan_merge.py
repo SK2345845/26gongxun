@@ -39,7 +39,7 @@ import serial.tools.list_ports
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QPushButton, QLabel, QDockWidget,
-                             QSpinBox, QFileDialog)
+                             QSpinBox, QFileDialog, QCheckBox)
 from PyQt5.QtCore import Qt, QTimer
 
 import matplotlib
@@ -80,10 +80,11 @@ _setup_cjk_font()      # 必须在 import field_map 之后（它会覆盖 rcPara
 
 
 # ==================== 合并 / 过滤 / 聚类参数 ====================
-MIN_RANGE = 80.0          # 近端门限 (mm)：滤车体/雷达座杂波
+MIN_RANGE = 260.0         # 近端门限 (mm)：车体最大回转半径212mm，必须滤掉自回波
 EXCLUDE_MARGIN = 40.0     # 过滤固定设施时的外扩余量 (mm)
 DBSCAN_EPS = 80.0         # 聚类邻域半径 (mm)，小于两个障碍的最小间距即可
 DBSCAN_MIN_PTS = 2        # 成簇最少点数：场内即障碍（宁多勿漏），单点毛刺扔掉
+MIN_VIEW_PTS = 2          # 双视角确认：每个障碍在两个视角各至少几个支撑点
 MAX_CLUSTER_EXTENT = 300.0  # 簇最大外接尺寸 (mm)：φ50 障碍 + 噪声余量；
                             # 超过判为墙/长条设施，丢弃（否则墙心会出假障碍）
 # 视场角（160°/180° 不确定）与最大扫描距离在 GUI 上调，见 _build_radar_dock
@@ -343,8 +344,13 @@ class MergeWindow(fm.MainWindow):
         self.mg.clicked.connect(self._merge_analyze)
         v.addWidget(self.mg)
 
-        # 保存 / 加载帧（离线重放调参数用）
+        # 双视角过滤（默认关）：勾选后单视角障碍剔除
         h4 = QHBoxLayout()
+        self.both_chk = QCheckBox("剔除单视角障碍")
+        self.both_chk.setChecked(False)
+        self.both_chk.setToolTip("勾选后：两个视角各至少2个支撑点的障碍才保留。\n"
+                                 "不勾选：全部显示，单视角障碍画虚线圈并在控制台标注")
+        h4.addWidget(self.both_chk)
         self.svb = QPushButton("保存帧")
         self.svb.clicked.connect(self._save_frames)
         h4.addWidget(self.svb)
@@ -594,11 +600,31 @@ class MergeWindow(fm.MainWindow):
 
         self.obstacles = detect_obstacles(self.merged_cloud)
 
+        # 逐障碍统计两个视角的支撑点数（诊断信息，默认不剔除）：
+        # 真障碍转 90° 后常能从另一方向再看一次；单视角簇可能是车体残留/多径/反光，
+        # 但视场有限，真障碍也可能只落在一个视角 → 是否剔除由用户勾选决定
+        self.obstacle_info = []                  # [(cx, cy, n1, n2)]
+        for cx, cy in self.obstacles:
+            n1 = sum(1 for x, y in w1 if math.hypot(x - cx, y - cy) < DBSCAN_EPS * 1.5)
+            n2 = sum(1 for x, y in w2 if math.hypot(x - cx, y - cy) < DBSCAN_EPS * 1.5)
+            self.obstacle_info.append((cx, cy, n1, n2))
+
+        if self.both_chk.isChecked():
+            dual = [o[:2] for o in self.obstacle_info
+                    if o[2] >= MIN_VIEW_PTS and o[3] >= MIN_VIEW_PTS]
+            for cx, cy, n1, n2 in self.obstacle_info:
+                if (cx, cy) not in dual:
+                    print(f"   剔除单视角障碍 ({cx:.0f},{cy:.0f})：视角1 {n1} 点 / 视角2 {n2} 点")
+            self.obstacles = dual
+
+        for i, (cx, cy, n1, n2) in enumerate(self.obstacle_info, 1):
+            if (cx, cy) in self.obstacles:
+                tag = "双视角" if (n1 >= MIN_VIEW_PTS and n2 >= MIN_VIEW_PTS) else "仅单视角"
+                print(f"   障碍{i}: ({cx:.0f}, {cy:.0f}) mm [{tag}: 视角1 {n1} 点 / 视角2 {n2} 点]")
+
         print(f"[合并] 视场 {self.fov_spin.value()}°, 最大距离 {self.rng_spin.value()}mm, "
               f"第1帧 {len(f1)} 点, 第2帧 {len(f2)} 点, "
-              f"合并 {len(self.merged_cloud)} 点, 检测到 {len(self.obstacles)} 个障碍")
-        for i, (ox, oy) in enumerate(self.obstacles, 1):
-            print(f"   障碍{i}: ({ox:.0f}, {oy:.0f}) mm")
+              f"合并 {len(self.merged_cloud)} 点, 最终 {len(self.obstacles)} 个障碍")
 
         self.st.setText(f"障碍 {len(self.obstacles)} 个 · 视场 {self.fov_spin.value()}°"
                         f" · {self.rng_spin.value()}mm · 车头 {h1}°/转角 {rot}°")
@@ -615,11 +641,23 @@ class MergeWindow(fm.MainWindow):
             xs = [p[0] for p in self.merged_cloud]
             ys = [p[1] for p in self.merged_cloud]
             self.ax.scatter(xs, ys, s=1, c="cyan", alpha=0.25, label="合并点云")
+        info = {((round(ox), round(oy))): (n1, n2)
+                for ox, oy, n1, n2 in getattr(self, "obstacle_info", [])}
         for i, (ox, oy) in enumerate(getattr(self, "obstacles", []), 1):
-            self.ax.add_patch(Circle((ox, oy), fm.OBSTACLE_R + 10,
-                                     facecolor="none", edgecolor="red", lw=2))
-            self.ax.annotate(f"障碍{i}", (ox, oy), textcoords="offset points",
-                             xytext=(8, 8), fontsize=8, color="red", fontweight="bold")
+            n1, n2 = info.get((round(ox), round(oy)), (0, 0))
+            single = (n1 < MIN_VIEW_PTS or n2 < MIN_VIEW_PTS)
+            if single:   # 单视角：虚线圈提示可能是误检（车体残留/多径/反光）
+                self.ax.add_patch(Circle((ox, oy), fm.OBSTACLE_R + 10,
+                                         facecolor="none", edgecolor="orange",
+                                         lw=2, linestyle="--"))
+                self.ax.annotate(f"障碍{i}?单视角", (ox, oy),
+                                 textcoords="offset points", xytext=(8, 8),
+                                 fontsize=8, color="darkorange", fontweight="bold")
+            else:        # 双视角支撑：实心红圈
+                self.ax.add_patch(Circle((ox, oy), fm.OBSTACLE_R + 10,
+                                         facecolor="none", edgecolor="red", lw=2))
+                self.ax.annotate(f"障碍{i}", (ox, oy), textcoords="offset points",
+                                 xytext=(8, 8), fontsize=8, color="red", fontweight="bold")
         if self.merged_cloud or getattr(self, "obstacles", []):
             self.canvas.draw_idle()
 
