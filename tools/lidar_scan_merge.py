@@ -12,10 +12,12 @@
        → 合并分析 + 路径规划
 
 原理：
-  - 雷达前装，只有前向约 180° 视野；车在原地转 90° 采两帧，拼成约 270° 视野
-  - 两帧在同一位置（S1/S2 原地旋转），合并 = 各自用不同车头朝向转到世界坐标取并集
+  - 雷达前装，视场角不确定（160°/180°）→ GUI「前向视场°」可调；「最大距离mm」可调
+  - 车在原地转 90° 采两帧，合并 = 各自用不同车头朝向转到世界坐标取并集
   - 过滤：场外(含二维码板)、原料区圆盘、暂存区/粗加工区矩形内的点都不算障碍
-  - 剩余点 DBSCAN 聚类 → 障碍中心 → 写入 field_map 的 obstacles → 复用其 A* 规划
+  - 剩余点 DBSCAN 聚类 → 簇尺寸>300mm 判墙丢弃 → 障碍中心 → 写入 field_map 的
+    obstacles → 复用其 A* 规划
+  - 底部三面板云图：实时 | 第1帧截取 | 第2帧截取
 
 坐标约定（与 field_map.py 一致，单位 mm）：
   - 世界系：原点在场地左下角，+x 向右，+y 向上
@@ -35,13 +37,14 @@ import serial.tools.list_ports
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QPushButton, QLabel, QDockWidget,
                              QSpinBox)
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QTimer
 
 import matplotlib
 
-matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'Arial Unicode MS']
 matplotlib.rcParams['axes.unicode_minus'] = False
 from matplotlib.patches import Circle
+from matplotlib.figure import Figure
+from matplotlib.backends.backend_qt5agg import FigureCanvas
 
 # 复用 field_map 的场地几何 / 连通图 / A* / 地图窗口
 import field_map as fm
@@ -49,20 +52,46 @@ import field_map as fm
 import lidar_viewer as lv
 
 
+# ---- 中文乱码修复：不写死字体名，运行时从系统已装字体里挑一个能用的 ----
+from matplotlib import font_manager
+
+def _setup_cjk_font():
+    """按优先级挑系统里真实存在的 CJK 字体；一个都没有就扫名字带汉字特征的。"""
+    prefer = ["Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC",
+              "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Zen Hei",
+              "WenQuanYi Micro Hei", "PingFang SC", "Arial Unicode MS"]
+    installed = {f.name for f in font_manager.fontManager.ttflist}
+    for name in prefer:
+        if name in installed:
+            matplotlib.rcParams["font.sans-serif"] = [name]
+            break
+    else:
+        keys = ("CJK", "YaHei", "SimHei", "SimSun", "Hei", "Song", "Kai",
+                "WenQuanYi", "Han")
+        for name in sorted(installed):
+            if any(k.lower() in name.lower() for k in keys):
+                matplotlib.rcParams["font.sans-serif"] = [name]
+                break
+
+_setup_cjk_font()      # 必须在 import field_map 之后（它会覆盖 rcParams）
+
+
 # ==================== 合并 / 过滤 / 聚类参数 ====================
-FRONT_HALF_DEG = 90.0     # 前向半角：只取前向 180°（背向被车体挡住）。可调
+MIN_RANGE = 80.0          # 近端门限 (mm)：滤车体/雷达座杂波
 EXCLUDE_MARGIN = 40.0     # 过滤固定设施时的外扩余量 (mm)
 DBSCAN_EPS = 80.0         # 聚类邻域半径 (mm)，小于两个障碍的最小间距即可
 DBSCAN_MIN_PTS = 3        # 成簇最少点数，低于此算噪声
 MAX_CLUSTER_EXTENT = 300.0  # 簇最大外接尺寸 (mm)：φ50 障碍 + 噪声余量；
                             # 超过判为墙/长条设施，丢弃（否则墙心会出假障碍）
+# 视场角（160°/180° 不确定）与最大扫描距离在 GUI 上调，见 _build_radar_dock
 # ============================================================
 
 
-def front_points(points):
-    """只保留前向 180°：雷达角 0°=正前、顺时针增，前向 = 0° 两侧 ±FRONT_HALF_DEG"""
+def crop_points(points, half_deg, max_range):
+    """按视场半角 + 距离窗裁剪：雷达角 0°=正前、顺时针增，前向 = 0° 两侧 ±half_deg"""
     return [(a, d) for a, d in points
-            if a <= FRONT_HALF_DEG or a >= 360.0 - FRONT_HALF_DEG]
+            if MIN_RANGE <= d <= max_range
+            and (a <= half_deg or a >= 360.0 - half_deg)]
 
 
 def radar_to_world(points, xc, yc, heading_deg, radar_offset_mm=0.0):
@@ -189,10 +218,15 @@ class MergeWindow(fm.MainWindow):
         self.setWindowTitle("雷达双视角合并建图 + 障碍检测 + 路径规划")
         self.reader = None
         self.parser = lv.LidarParser()
-        self.frame1 = None          # 第 1 帧点 [(a, d)]
-        self.frame2 = None          # 第 2 帧点 [(a, d)]
+        self.frame1 = None          # 第 1 帧原始点 [(a, d)]（未裁剪）
+        self.frame2 = None          # 第 2 帧原始点 [(a, d)]（未裁剪）
         self.merged_cloud = []      # 合并后的世界坐标点（画图用）
         self._build_radar_dock()
+        self._build_cloud_dock()
+        # 实时云图刷新（连上雷达后每 200ms 重画左 panel）
+        self._live_timer = QTimer(self)
+        self._live_timer.timeout.connect(self._update_live)
+        self._live_timer.start(200)
 
     # ---------------- 雷达控制停靠栏 ----------------
     def _build_radar_dock(self):
@@ -236,6 +270,22 @@ class MergeWindow(fm.MainWindow):
         h2.addWidget(self.off_spin)
         v.addLayout(h2)
 
+        # 视场角 / 最大扫描距离（160° 还是 180° 不确定 → 都可调）
+        h2b = QHBoxLayout()
+        h2b.addWidget(QLabel("前向视场°"))
+        self.fov_spin = QSpinBox()
+        self.fov_spin.setRange(60, 360)
+        self.fov_spin.setSingleStep(10)
+        self.fov_spin.setValue(180)
+        h2b.addWidget(self.fov_spin)
+        h2b.addWidget(QLabel("最大距离mm"))
+        self.rng_spin = QSpinBox()
+        self.rng_spin.setRange(300, 10000)
+        self.rng_spin.setSingleStep(100)
+        self.rng_spin.setValue(4000)
+        h2b.addWidget(self.rng_spin)
+        v.addLayout(h2b)
+
         # 采集 / 合并
         h3 = QHBoxLayout()
         self.f1b = QPushButton("采集第1帧")
@@ -258,6 +308,46 @@ class MergeWindow(fm.MainWindow):
         dock.setWidget(w)
         self.addDockWidget(Qt.RightDockWidgetArea, dock)
         self._refresh_ports()
+
+    # ---------------- 三面板云图停靠栏 ----------------
+    def _build_cloud_dock(self):
+        dock = QDockWidget("雷达云图：实时 | 第1帧截取 | 第2帧截取", self)
+        dock.setFeatures(QDockWidget.DockWidgetMovable | QDockWidget.DockWidgetFloatable)
+        self.cloud_fig = Figure(figsize=(11, 3.4), dpi=100)
+        self.cloud_canvas = FigureCanvas(self.cloud_fig)
+        self.ax_live, self.ax_f1, self.ax_f2 = self.cloud_fig.subplots(1, 3)
+        self._draw_local(self.ax_live, [], "实时", "#0ea5e9")
+        self._draw_local(self.ax_f1, [], "第1帧截取", "#16a34a")
+        self._draw_local(self.ax_f2, [], "第2帧截取", "#d97706")
+        dock.setWidget(self.cloud_canvas)
+        self.addDockWidget(Qt.BottomDockWidgetArea, dock)
+        self.resizeDocks([dock], [320], Qt.Vertical)
+
+    def _draw_local(self, ax, pts, title, color):
+        """雷达本地坐标画点云：0°朝上（车正前），右侧角度增"""
+        ax.clear()
+        if pts:
+            xs = [d * math.sin(math.radians(a)) for a, d in pts]
+            ys = [d * math.cos(math.radians(a)) for a, d in pts]
+            ax.scatter(xs, ys, s=2, c=color)
+        r = float(self.rng_spin.value())
+        ax.plot(0, 0, marker="v", color="red", ms=8)    # 红三角=车头
+        ax.set_title(title, fontsize=9)
+        ax.set_aspect("equal")
+        ax.set_xlim(-r, r)
+        ax.set_ylim(-0.15 * r, 1.05 * r)
+        ax.grid(alpha=0.3)
+
+    def _update_live(self):
+        """定时刷新实时面板（未连接时不动）"""
+        if not (self.reader and self.reader.running):
+            return
+        latest = self.reader.get_latest()
+        if not latest:
+            return
+        self._draw_local(self.ax_live, latest,
+                         f"实时 ({len(latest)}点)", "#0ea5e9")
+        self.cloud_canvas.draw_idle()
 
     # ---------------- 串口管理 ----------------
     def _refresh_ports(self):
@@ -310,19 +400,31 @@ class MergeWindow(fm.MainWindow):
                 acc[b] = (acc[b] + d) / 2 if b in acc else d
         return [(float(b), d) for b, d in acc.items()]
 
+    def _crop_cur(self, raw):
+        """按当前 GUI 的视场角/最大距离裁剪原始帧"""
+        return crop_points(raw, self.fov_spin.value(), self.rng_spin.value())
+
     def _capture_frame1(self):
         raw = self._capture_revolution()
         if raw:
-            self.frame1 = front_points(raw)
-            self.st.setText(f"第1帧：{len(self.frame1)} 点（前向）")
+            self.frame1 = raw           # 存原始帧，改裁剪参数后合并时重新截取
+            crop = self._crop_cur(raw)
+            self._draw_local(self.ax_f1, crop,
+                             f"第1帧截取 ({len(crop)}点)", "#16a34a")
+            self.cloud_canvas.draw_idle()
+            self.st.setText(f"第1帧：原始 {len(raw)} 点，截取 {len(crop)} 点")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
     def _capture_frame2(self):
         raw = self._capture_revolution()
         if raw:
-            self.frame2 = front_points(raw)
-            self.st.setText(f"第2帧：{len(self.frame2)} 点（前向）")
+            self.frame2 = raw
+            crop = self._crop_cur(raw)
+            self._draw_local(self.ax_f2, crop,
+                             f"第2帧截取 ({len(crop)}点)", "#d97706")
+            self.cloud_canvas.draw_idle()
+            self.st.setText(f"第2帧：原始 {len(raw)} 点，截取 {len(crop)} 点")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
@@ -339,18 +441,22 @@ class MergeWindow(fm.MainWindow):
         off = float(self.off_spin.value())
         h2 = h1 + rot
 
-        w1 = radar_to_world(self.frame1, xc, yc, h1, off)
-        w2 = radar_to_world(self.frame2, xc, yc, h2, off)
+        f1 = self._crop_cur(self.frame1)  # 用当前视场角/最大距离重新截取
+        f2 = self._crop_cur(self.frame2)
+        w1 = radar_to_world(f1, xc, yc, h1, off)
+        w2 = radar_to_world(f2, xc, yc, h2, off)
         self.merged_cloud = w1 + w2
 
         self.obstacles = detect_obstacles(self.merged_cloud)
 
-        print(f"[合并] 第1帧 {len(self.frame1)} 点, 第2帧 {len(self.frame2)} 点, "
+        print(f"[合并] 视场 {self.fov_spin.value()}°, 最大距离 {self.rng_spin.value()}mm, "
+              f"第1帧 {len(f1)} 点, 第2帧 {len(f2)} 点, "
               f"合并 {len(self.merged_cloud)} 点, 检测到 {len(self.obstacles)} 个障碍")
         for i, (ox, oy) in enumerate(self.obstacles, 1):
             print(f"   障碍{i}: ({ox:.0f}, {oy:.0f}) mm")
 
-        self.st.setText(f"障碍 {len(self.obstacles)} 个 · 车头 {h1}° / 转角 {rot}°")
+        self.st.setText(f"障碍 {len(self.obstacles)} 个 · 视场 {self.fov_spin.value()}°"
+                        f" · {self.rng_spin.value()}mm · 车头 {h1}°/转角 {rot}°")
         self.robot_st.setText(f"状态: 检测到 {len(self.obstacles)} 个障碍，规划默认任务")
         self._default_task()             # 用检测到的障碍跑 A*，画出路径
 
@@ -386,6 +492,8 @@ def _selftest():
     win.hdg_spin.setValue(180)                  # 车头朝仿真脚本的左
     win.rot_spin.setValue(90)                   # 原地转 90° 朝下（二维码板一侧）
     win.off_spin.setValue(150)
+    win.fov_spin.setValue(160)                  # 故意用 160° 验证视场可调
+    win.rng_spin.setValue(4000)
 
     xc, yc = fm.NODES["S1"]
     off = 150.0
@@ -415,18 +523,18 @@ def _selftest():
             pol.append(((heading - phi) % 360.0, math.hypot(wx - rx, wy - ry)))
         return pol
 
-    win.frame1 = front_points(to_polar(world, 180.0))
-    win.frame2 = front_points(to_polar(world, 270.0))
+    win.frame1 = to_polar(world, 180.0)         # 存原始帧（GUI 用当前参数截取）
+    win.frame2 = to_polar(world, 270.0)
     win._merge_analyze()
 
     # ---- 核对 ----
     det = win.obstacles
-    print(f"[自测] 真值障碍 {len(true_obs)} 个，检出 {len(det)} 个")
+    print(f"[自测] 视场 {win.fov_spin.value()}°，真值障碍 {len(true_obs)} 个，检出 {len(det)} 个")
     matched = 0
     for tx, ty in true_obs:
         hit = any(math.hypot(dx - tx, dy - ty) < 120 for dx, dy in det)
         matched += 1 if hit else 0
-        print(f"  真值({tx:>4},{ty:>4}) → {'✅ 检出' if hit else '❌ 漏检'}")
+        print(f"  真值({tx:>4},{ty:>4}) -> {'OK 检出' if hit else 'X 漏检'}")
     false_pos = [(round(dx), round(dy)) for dx, dy in det
                  if not any(math.hypot(dx - tx, dy - ty) < 120 for tx, ty in true_obs)]
     print(f"[自测] 匹配 {matched}/{len(true_obs)}，误检 {len(false_pos)} {false_pos}")
@@ -435,6 +543,14 @@ def _selftest():
     out = "selftest_merge.png"
     win.figure.savefig(out, dpi=120)
     print(f"[自测] 地图已保存: {out}")
+    win._draw_local(win.ax_f1, win._crop_cur(win.frame1),
+                    f"第1帧截取 ({len(win._crop_cur(win.frame1))}点)", "#16a34a")
+    win._draw_local(win.ax_f2, win._crop_cur(win.frame2),
+                    f"第2帧截取 ({len(win._crop_cur(win.frame2))}点)", "#d97706")
+    win._draw_local(win.ax_live, win.frame1, "实时(用第1帧演示)", "#0ea5e9")
+    clouds = "selftest_clouds.png"
+    win.cloud_fig.savefig(clouds, dpi=120)
+    print(f"[自测] 三面板云图已保存: {clouds}")
     return 0 if (matched == len(true_obs) and not false_pos) else 1
 
 
