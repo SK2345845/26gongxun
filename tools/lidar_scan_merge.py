@@ -97,6 +97,29 @@ def crop_points(points, half_deg, max_range):
             and (a <= half_deg or a >= 360.0 - half_deg)]
 
 
+def aggregate_revs(revs, min_frac=0.6):
+    """多圈聚合滤波：按 1° 分箱，只保留出现在 ≥min_frac 圈数里的 bin，
+    距离取中值。毛刺只在个别圈出现 → 被出现率门槛干掉；真障碍每圈都在，
+    中值压抖动。静止采集时这是零成本的免费滤波。"""
+    n = len(revs)
+    if n <= 1:
+        return list(revs[0]) if n else []
+    need = max(2, math.ceil(n * min_frac))
+    bins = {}
+    for rev in revs:
+        for a, d in rev:
+            b = int(round(a)) % 360
+            bins.setdefault(b, []).append(d)
+    out = []
+    for b, ds in sorted(bins.items()):
+        if len(ds) >= need:
+            ds = sorted(ds)
+            m = len(ds) // 2
+            med = ds[m] if len(ds) % 2 else (ds[m - 1] + ds[m]) / 2
+            out.append((float(b), med))
+    return out
+
+
 def radar_to_world(points, xc, yc, heading_deg, radar_offset_mm=0.0):
     """雷达极坐标点 [(angle_deg, dist_mm)] → 世界笛卡尔 [(x, y)]。
 
@@ -297,6 +320,13 @@ class MergeWindow(fm.MainWindow):
                                  "静止采集建议 300，圆柱点更多、检测更稳。\n"
                                  "0=不发调速命令（旧行为，调速异常时选这个）")
         h2b.addWidget(self.rpm_spin)
+        h2b.addWidget(QLabel("采集圈数"))
+        self.cnt_spin = QSpinBox()
+        self.cnt_spin.setRange(1, 20)
+        self.cnt_spin.setValue(5)
+        self.cnt_spin.setToolTip("每帧采 N 圈做多圈聚合滤波：毛刺被出现率门槛干掉，\n"
+                                 "真障碍取中值压抖动。静止采集建议 5 圈")
+        h2b.addWidget(self.cnt_spin)
         v.addLayout(h2b)
 
         # 采集 / 合并
@@ -433,27 +463,42 @@ class MergeWindow(fm.MainWindow):
         """按当前 GUI 的视场角/最大距离裁剪原始帧"""
         return crop_points(raw, self.fov_spin.value(), self.rng_spin.value())
 
+    def _capture_multi(self):
+        """连采 N 圈做聚合滤波（毛刺剔除+中值），返回 (帧, 实际圈数)"""
+        n = self.cnt_spin.value()
+        revs = []
+        for _ in range(n):
+            QApplication.processEvents()         # 长采集保持界面响应
+            rev = self._capture_revolution()
+            if rev:
+                revs.append(rev)
+        if not revs:
+            return None
+        return aggregate_revs(revs), len(revs)
+
     def _capture_frame1(self):
-        raw = self._capture_revolution()
-        if raw:
-            self.frame1 = raw           # 存原始帧，改裁剪参数后合并时重新截取
+        res = self._capture_multi()
+        if res:
+            raw, nrev = res
+            self.frame1 = raw           # 存聚合后的帧，改裁剪参数后合并时重新截取
             crop = self._crop_cur(raw)
             self._draw_local(self.ax_f1, crop,
                              f"第1帧截取 ({len(crop)}点)", "#16a34a")
             self.cloud_canvas.draw_idle()
-            self.st.setText(f"第1帧：原始 {len(raw)} 点，截取 {len(crop)} 点")
+            self.st.setText(f"第1帧：{nrev} 圈聚合 {len(raw)} 点，截取 {len(crop)} 点")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
     def _capture_frame2(self):
-        raw = self._capture_revolution()
-        if raw:
+        res = self._capture_multi()
+        if res:
+            raw, nrev = res
             self.frame2 = raw
             crop = self._crop_cur(raw)
             self._draw_local(self.ax_f2, crop,
                              f"第2帧截取 ({len(crop)}点)", "#d97706")
             self.cloud_canvas.draw_idle()
-            self.st.setText(f"第2帧：原始 {len(raw)} 点，截取 {len(crop)} 点")
+            self.st.setText(f"第2帧：{nrev} 圈聚合 {len(raw)} 点，截取 {len(crop)} 点")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
@@ -665,7 +710,20 @@ def _selftest():
     os.remove(tmp)
     print(f"[自测] 帧存取往返: {'OK' if ok_io else 'X 失败'}"
           f"（{n1}/{n2} 点, 参数恢复 视场{win.fov_spin.value()}°/车头{win.hdg_spin.value()}°）")
-    return 0 if (matched == len(true_obs) and not false_pos and ok_io) else 1
+
+    # ---- 多圈聚合滤波测试：圆柱每圈都在，毛刺只出现1/5圈 ----
+    revs = []
+    for k in range(5):
+        r = [(10.2, 1000 + (k % 3) * 8), (10.8, 1004 - (k % 2) * 6)]
+        if k == 2:
+            r.append((200.0, 1500))          # 毛刺：只在第3圈出现
+        revs.append(r)
+    agg = aggregate_revs(revs)
+    ok_agg = (len(agg) == 2
+              and not any(abs(a - 200.0) < 1 for a, _ in agg)
+              and all(990 <= d <= 1015 for _, d in agg))
+    print(f"[自测] 多圈聚合: {'OK' if ok_agg else 'X 失败'}（保留 {len(agg)}/3 个bin，毛刺被剔除）")
+    return 0 if (matched == len(true_obs) and not false_pos and ok_io and ok_agg) else 1
 
 
 def main():
