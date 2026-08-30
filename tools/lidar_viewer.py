@@ -33,8 +33,21 @@ from matplotlib.patches import Rectangle
 import matplotlib
 
 # matplotlib 默认字体不含中文，指定系统字体，否则中文显示成方块
-matplotlib.rcParams['font.sans-serif'] = ['Microsoft YaHei', 'SimHei', 'SimSun', 'Arial Unicode MS']
 matplotlib.rcParams['axes.unicode_minus'] = False   # 负号正常显示
+
+# 中文乱码修复：运行时从系统已装字体里挑一个能用的（不写死字体名）
+from matplotlib import font_manager as _fm
+
+def _setup_cjk_font():
+    installed = {f.name for f in _fm.fontManager.ttflist}
+    for name in ["Microsoft YaHei", "SimHei", "SimSun", "Noto Sans CJK SC",
+                 "Noto Sans SC", "Source Han Sans SC", "WenQuanYi Zen Hei",
+                 "WenQuanYi Micro Hei", "PingFang SC", "Arial Unicode MS"]:
+        if name in installed:
+            matplotlib.rcParams["font.sans-serif"] = [name]
+            break
+
+_setup_cjk_font()
 
 # ================== 配置 ==================
 BAUD = 460800
@@ -43,9 +56,14 @@ OBSTACLE_DIST = 4000        # 疑似障碍物检测距离 (mm)
 OBSTACLE_FRONT_HALF = 70    # 前方半角 ±70°（共 140°；0°=正前方，顺时针）
 SMOOTH_FRAMES = 3           # 多圈平均圈数（平滑点云飘动）
 SMOOTH_MIN_COUNT = 2        # 一个角度 bin 至少出现在几圈才保留（滤随机噪声）
-MIN_OBSTACLE_POINTS = 2     # 一个障碍至少几个点，否则算噪声（小障碍点少，调到 2）
+MIN_OBSTACLE_POINTS = 2     # 一个障碍至少几个点，否则算噪声（φ50圆柱远处只有2-3点）
 OBSTACLE_ANGLE_GAP = 3.0    # 相邻点角度差 >此值(°) → 不同障碍
-CONFIDENCE_REF_POINTS = 20  # 达到这个点数算 100% 置信度
+# ---- 障碍判别（φ50 圆柱专用，替代纯点数置信度）----
+CLUSTER_MAX_EXTENT = 150.0  # 簇最大外接尺寸 (mm)：圆柱≈50mm，墙碎片几百mm → 直接扔
+EXPECTED_PTS_1M = 6.0       # φ50 圆柱在 1m 处的期望点数（按角分辨率估算，可实测校准）
+PERSIST_FRAMES = 5          # 位置持续性窗口：最近 N 帧里同位置反复出现 → 稳定障碍
+MATCH_RADIUS_MM = 120.0     # 跨帧配同一障碍的位置容差 (mm)
+MIN_CONFIDENCE = 60         # 置信度低于此值不显示（但照样计入持续性窗口攒分）
 # ==========================================
 
 
@@ -218,6 +236,9 @@ class MainWindow(QMainWindow):
         self.reader = None
         self.parser = LidarParser()
         self.recent = []       # 最近几圈点云（平滑用）
+        self._obs_hist = []    # 最近 PERSIST_FRAMES 帧的障碍位置（持续性判定用）
+        self._last_rev = None  # 上一处理的圈（同一圈不重复计入持续性窗口）
+        self._last_obstacles = []  # 最近一次检测结果（离线测试用）
         self._build()
 
         # 定时刷新点云（50ms）
@@ -464,6 +485,11 @@ class MainWindow(QMainWindow):
             return
         raw = self.reader.get_latest()
         if raw:
+            if raw is self._last_rev:
+                # 同一圈数据：50ms tick 只重画，不重复跑检测/持续性窗口
+                self.canvas.draw_idle()
+                return
+            self._last_rev = raw
             # 多圈平均平滑
             pts = self._smooth(raw)
 
@@ -486,13 +512,40 @@ class MainWindow(QMainWindow):
             obs_points = []     # 用于红叉显示的点
             if self.mode_cb.currentText() == "自动搜索":
                 segments = self._segment_obstacles(zone)
-                real = [s for s in segments if len(s) >= MIN_OBSTACLE_POINTS]
-                for s in real:
-                    # 用最近点（距离最小）作为障碍位置，避免平均值落在两障碍之间的空白
+                cands = []          # [(a, d, geom_conf, n, xy_points)]
+                for s in segments:
+                    if len(s) < MIN_OBSTACLE_POINTS:
+                        continue
+                    xy = [(d * math.sin(math.radians(a)),
+                           d * math.cos(math.radians(a))) for a, d in s]
+                    # 簇外接尺寸：圆柱≈50mm；墙/设施碎片几百mm → 直接丢弃
+                    ext = max(math.dist(p, q) for p in xy for q in xy)
+                    if ext > CLUSTER_MAX_EXTENT:
+                        continue
+                    # 用最近点（距离最小）作为障碍位置，避免平均值落空白
                     ca, cd = min(s, key=lambda p: p[1])
-                    conf = min(100, len(s) * 100 // CONFIDENCE_REF_POINTS)
-                    obstacles.append((ca, cd, conf, len(s)))
-                obs_points = [p for s in real for p in s]
+                    # 几何置信 = 点数是否达到该距离下的期望值 + 簇是否紧凑
+                    exp_pts = max(2.0, EXPECTED_PTS_1M * 1000.0 / max(cd, 1.0))
+                    s_pts = min(1.0, len(s) / exp_pts)
+                    s_ext = min(1.0, 60.0 / max(ext, 1.0))   # 越接近φ50越像圆柱
+                    cands.append((ca, cd, 0.5 * s_pts + 0.5 * s_ext, len(s), xy))
+                # 持续性：同一位置连续多帧出现才算稳（闪烁毛刺被压掉）
+                hits = []
+                for ca, cd, geom, n, xy in cands:
+                    p = (cd * math.sin(math.radians(ca)),
+                         cd * math.cos(math.radians(ca)))
+                    k = sum(1 for frame in self._obs_hist
+                            if any(math.dist(p, q) < MATCH_RADIUS_MM for q in frame))
+                    denom = max(len(self._obs_hist), 1)
+                    persist = k / PERSIST_FRAMES if len(self._obs_hist) >= PERSIST_FRAMES else k / denom
+                    conf = int(round(100 * (0.4 * geom + 0.6 * persist)))
+                    hits.append(p)          # 先攒持续性，低分帧也算出现
+                    obs_points.extend(xy)
+                    if conf >= MIN_CONFIDENCE:
+                        obstacles.append((ca, cd, conf, n))
+                self._obs_hist.append(hits)
+                if len(self._obs_hist) > PERSIST_FRAMES:
+                    self._obs_hist.pop(0)
             else:
                 k = self.k_spin.value()
                 if k > 0 and zone:
@@ -500,9 +553,12 @@ class MainWindow(QMainWindow):
                     for cx, cy, n in kmeans_cluster(xy, k):
                         ang = math.degrees(math.atan2(cx, cy)) % 360
                         dist = math.hypot(cx, cy)
-                        conf = min(100, n * 100 // CONFIDENCE_REF_POINTS)
+                        # 与自动模式同源的点数置信：n 达到该距离期望值即 100%
+                        exp_pts = max(2.0, EXPECTED_PTS_1M * 1000.0 / max(dist, 1.0))
+                        conf = int(round(100 * min(1.0, n / exp_pts)))
                         obstacles.append((ang, dist, conf, n))
                     obs_points = zone
+            self._last_obstacles = obstacles
 
             # 红叉：障碍点
             if obs_points:
