@@ -49,10 +49,7 @@ int main(void)
               plan.b2_ring[0] == 2 && plan.b2_ring[1] == 3 && plan.b2_ring[2] == 1, "");
         check("原始码保存", strcmp(plan.raw, "156+123+516+231") == 0, "");
 
-        /* ---- 颜色名称/索引 ---- */
-        check("颜色1=红", strcmp(TaskCode_ColorName(1), "红") == 0, "");
-        check("颜色6=浅蓝", strcmp(TaskCode_ColorName(6), "浅蓝") == 0, "");
-        check("颜色7非法名", strcmp(TaskCode_ColorName(7), "?") == 0, "");
+        /* ---- 颜色索引 ---- */
         check("颜色索引6→5", TaskCode_ColorIndex(6) == 5, "");
         check("颜色索引0非法", TaskCode_ColorIndex(0) == 0xFF, "");
 

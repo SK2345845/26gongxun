@@ -55,6 +55,21 @@ KEY_INFO = {
     "r": ("R", "逆时针"),
 }
 
+# 指令字符 → 需要高亮的按键（斜向 q/z/c/v 高亮两个方向键）
+COMMAND_HIGHLIGHT = {
+    "w": ("w",), "s": ("s",), "a": ("a",), "d": ("d",),
+    "e": ("e",), "r": ("r",), "x": (),
+    "q": ("w", "a"), "c": ("w", "d"),
+    "z": ("s", "a"), "v": ("s", "d"),
+}
+
+# 定距移动：方向名 → 指令字符
+DIR_CMD = {
+    "前进": "w", "后退": "s", "左移": "a", "右移": "d",
+    "顺时针": "e", "逆时针": "r",
+    "前左": "q", "前右": "c", "后左": "z", "后右": "v",
+}
+
 
 class OmniRemote:
     def __init__(self, port: str, baudrate: int, speed: int) -> None:
@@ -90,6 +105,7 @@ class OmniRemote:
         self._build_pad()
         self._build_log()
         self._build_speedbar()
+        self._build_movebar()
 
         self.window.bind("<KeyPress>", self.on_key_press)
         self.window.bind("<KeyRelease>", self.on_key_release)
@@ -174,6 +190,62 @@ class OmniRemote:
         tk.Label(bar, text="按住 W/A/S/D 移动 · E/R 旋转 · 松开停止", bg=BG,
                  fg="#94a3b8", font=(FONT, 9)).pack(side="right")
 
+    def _build_movebar(self):
+        """定距移动：方向 + 脉冲数，走位置模式（为跑图/调参打基础）。"""
+        bar = tk.Frame(self.window, bg=BG)
+        bar.pack(fill="x", padx=18, pady=(0, 14))
+
+        tk.Label(bar, text="定距移动", bg=BG, fg="#475569",
+                 font=(FONT, 10, "bold")).pack(side="left")
+
+        self.dir_box = ttk.Combobox(bar, state="readonly", width=8,
+                                    values=list(DIR_CMD.keys()))
+        self.dir_box.current(0)
+        self.dir_box.pack(side="left", padx=(8, 4))
+
+        self.pulse_entry = tk.Entry(bar, width=10, font=(FONT, 10))
+        self.pulse_entry.insert(0, "3200")
+        self.pulse_entry.pack(side="left", padx=4)
+
+        tk.Label(bar, text="脉冲(3200=1圈)", bg=BG, fg="#94a3b8",
+                 font=(FONT, 8)).pack(side="left")
+
+        self._make_button(bar, "移动", self._on_move, primary=True).pack(side="left", padx=(8, 0))
+
+    def _on_move(self) -> None:
+        d = DIR_CMD.get(self.dir_box.get(), "")
+        if not d:
+            return
+        try:
+            pulses = int(self.pulse_entry.get())
+        except ValueError:
+            self._log_system("脉冲数无效，请输入整数")
+            return
+        if pulses <= 0:
+            self._log_system("脉冲数需 > 0")
+            return
+        self.send_move(d, pulses)
+        self.window.focus_set()
+
+    def send_move(self, d: str, pulses: int) -> None:
+        if not self.serial or not self.serial.is_open:
+            self._log_system("未连接，无法发送定距移动")
+            return
+        # 定距移动期间关闭速度心跳，否则 200ms 后的 'x' 会打断位置运动
+        self._stop_heartbeat()
+        try:
+            self.serial.write(b"x")                              # 先停稳
+            self.serial.flush()
+            self.serial.write(f"M{d} {pulses}\r\n".encode("ascii"))
+            self.serial.flush()
+        except (serial.SerialException, OSError) as error:
+            self._on_rx_error(f"发送失败: {error}")
+            return
+        self.last_command = "x"
+        self._highlight("x")
+        self.tx_label.config(text=f"TX: M{d} {pulses}")
+        self._log_system(f"发送定距移动: {self.dir_box.get()} {pulses} 脉冲")
+
     # ---------------------------------------------------------------- 绘制
     def _round_rect(self, x1, y1, x2, y2, r, **kw):
         pts = [
@@ -237,15 +309,16 @@ class OmniRemote:
         self._update_indicator(self.display_command)
 
     def _update_indicator(self, command: str) -> None:
+        on = set(COMMAND_HIGHLIGHT.get(command, ()))
         for key, shape in self.key_shapes.items():
-            on = key == command
+            active = key in on
             self.canvas.itemconfig(shape,
-                                   fill=ACT_FILL if on else KEY_FILL,
-                                   outline=ACT_BORDER if on else KEY_BORDER)
+                                   fill=ACT_FILL if active else KEY_FILL,
+                                   outline=ACT_BORDER if active else KEY_BORDER)
             self.canvas.itemconfig(self.key_letters[key],
-                                   fill=ACT_TEXT if on else KEY_TEXT)
+                                   fill=ACT_TEXT if active else KEY_TEXT)
             self.canvas.itemconfig(self.key_subs[key],
-                                   fill=ACT_SUB if on else KEY_SUB)
+                                   fill=ACT_SUB if active else KEY_SUB)
 
     def _highlight(self, command: str) -> None:
         self.display_command = command
@@ -411,12 +484,44 @@ class OmniRemote:
         self._log_line(text, color="#fbbf24")
 
     # ---------------------------------------------------------------- 输入
+    def _compute_command(self) -> str:
+        """把当前按下的按键组合成单个指令字符（含斜向 45°）。"""
+        fwd = "w" in self.pressed
+        bwd = "s" in self.pressed
+        lft = "a" in self.pressed
+        rgt = "d" in self.pressed
+        v = (1 if fwd else 0) - (1 if bwd else 0)   # +1 前 -1 后
+        h = (1 if rgt else 0) - (1 if lft else 0)   # +1 右 -1 左
+        if v > 0 and h == 0:
+            return "w"
+        if v < 0 and h == 0:
+            return "s"
+        if v == 0 and h < 0:
+            return "a"
+        if v == 0 and h > 0:
+            return "d"
+        if v > 0 and h < 0:
+            return "q"   # 前左
+        if v > 0 and h > 0:
+            return "c"   # 前右
+        if v < 0 and h < 0:
+            return "z"   # 后左
+        if v < 0 and h > 0:
+            return "v"   # 后右
+        if "e" in self.pressed and "r" not in self.pressed:
+            return "e"
+        if "r" in self.pressed and "e" not in self.pressed:
+            return "r"
+        return "x"
+
     def on_key_press(self, event: tk.Event) -> None:
         key = event.keysym.lower()
         if key in COMMAND_KEYS:
             self.pressed.add(key)
-            self.send(key)
-            self._highlight(key)
+            self._start_heartbeat()   # 定距移动后重新启用速度心跳
+            cmd = self._compute_command()
+            self.send(cmd)
+            self._highlight(cmd)
         elif key in ("plus", "equal", "kp_add"):
             self.send_speed_adjust(1)
         elif key in ("minus", "underscore", "kp_subtract"):
@@ -426,15 +531,17 @@ class OmniRemote:
         key = event.keysym.lower()
         if key in COMMAND_KEYS:
             self.pressed.discard(key)
-            nxt = next(iter(self.pressed)) if self.pressed else "x"
-            self.send(nxt)
-            self._highlight(nxt)
+            cmd = self._compute_command()
+            self.send(cmd)
+            self._highlight(cmd)
 
     def _mouse_press(self, key: str) -> None:
         self._mouse_key = key
         self.pressed.add(key)
-        self.send(key)
-        self._highlight(key)
+        self._start_heartbeat()
+        cmd = self._compute_command()
+        self.send(cmd)
+        self._highlight(cmd)
         self.window.focus_set()
 
     def _mouse_release(self, _event=None) -> None:
@@ -442,9 +549,9 @@ class OmniRemote:
             return
         self.pressed.discard(self._mouse_key)
         self._mouse_key = None
-        nxt = next(iter(self.pressed)) if self.pressed else "x"
-        self.send(nxt)
-        self._highlight(nxt)
+        cmd = self._compute_command()
+        self.send(cmd)
+        self._highlight(cmd)
 
     def _on_scan(self) -> None:
         self.refresh_ports()

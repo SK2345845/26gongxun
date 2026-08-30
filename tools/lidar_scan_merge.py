@@ -83,7 +83,7 @@ _setup_cjk_font()      # 必须在 import field_map 之后（它会覆盖 rcPara
 MIN_RANGE = 80.0          # 近端门限 (mm)：滤车体/雷达座杂波
 EXCLUDE_MARGIN = 40.0     # 过滤固定设施时的外扩余量 (mm)
 DBSCAN_EPS = 80.0         # 聚类邻域半径 (mm)，小于两个障碍的最小间距即可
-DBSCAN_MIN_PTS = 3        # 成簇最少点数，低于此算噪声
+DBSCAN_MIN_PTS = 2        # 成簇最少点数：场内即障碍（宁多勿漏），单点毛刺扔掉
 MAX_CLUSTER_EXTENT = 300.0  # 簇最大外接尺寸 (mm)：φ50 障碍 + 噪声余量；
                             # 超过判为墙/长条设施，丢弃（否则墙心会出假障碍）
 # 视场角（160°/180° 不确定）与最大扫描距离在 GUI 上调，见 _build_radar_dock
@@ -291,7 +291,7 @@ class MergeWindow(fm.MainWindow):
         self.rpm_spin = QSpinBox()
         self.rpm_spin.setRange(0, 900)
         self.rpm_spin.setSingleStep(50)
-        self.rpm_spin.setValue(600)
+        self.rpm_spin.setValue(0)          # 默认不调速（供电不稳会掉数据流）
         self.rpm_spin.setSpecialValueText("不调速")
         self.rpm_spin.setToolTip("600=10Hz标准；300≈5Hz 每圈点数×2。\n"
                                  "静止采集建议 300，圆柱点更多、检测更稳。\n"
