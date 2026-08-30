@@ -145,6 +145,7 @@ class SerialReader:
         self.latest = None
         self.lost = False          # 非 stop() 导致的意外退出（如拔线）
         self.lost_reason = ""
+        self.speed_applied = (rpm != 0)   # 调速是否生效（无数据时看门狗会改 False）
         self._lock = threading.Lock()
 
     def start(self):
@@ -184,6 +185,7 @@ class SerialReader:
     def set_rpm(self, rpm):
         """在线调速（已连接时调用）。应答描述符可能被读线程收走，解析器可自行重对齐"""
         self.rpm = rpm
+        self.speed_applied = (rpm != 0)
         if self.ser and self.ser.is_open:
             try:
                 self.ser.write(b"\xA5\xA8\x02" + struct.pack("<H", int(rpm)))
@@ -191,6 +193,20 @@ class SerialReader:
             except Exception:
                 return False
         return False
+
+    def _recover_scan(self):
+        """调速命令疑似不被固件接受/供电不足导致无数据：
+        复位雷达（调速设定随之清除），按默认转速重新扫描"""
+        try:
+            self.ser.write(b"\xA5\x25")          # STOP 停数据流
+            self.ser.write(b"\xA5\x40")          # RESET 复位（调速设定清除）
+            time.sleep(0.8)                      # 等雷达重启
+            self.ser.reset_input_buffer()
+            self.parser.reset()
+            self.ser.write(b"\xA5\x20")          # 重新 SCAN
+            self.speed_applied = False
+        except Exception:
+            pass
 
     def stop(self):
         self.running = False
@@ -212,6 +228,9 @@ class SerialReader:
         self.thr = None
 
     def _loop(self):
+        # 发过调速命令时：3 秒内没等到第一圈数据 → 看门狗复位雷达退回默认转速
+        deadline = time.time() + 3.0 if self.rpm else None
+        recovered = False
         while self.running:
             try:
                 if not self.ser or not self.ser.is_open:
@@ -222,8 +241,16 @@ class SerialReader:
                     self.parser.feed(d)
                     pts = self.parser.take_completed()
                     if pts is not None:
+                        deadline = None        # 数据流正常，解除看门狗
                         with self._lock:
                             self.latest = pts
+                if deadline and time.time() > deadline:
+                    if recovered:              # 复位后仍无数据 → 彻底失败
+                        self.lost_reason = "雷达无数据流（检查供电/接线）"
+                        break
+                    recovered = True
+                    self._recover_scan()
+                    deadline = time.time() + 3.0
             except Exception as e:
                 self.lost_reason = str(e) or "串口读异常"
                 break
@@ -471,6 +498,12 @@ class MainWindow(QMainWindow):
         self.reader = SerialReader(port, BAUD, self.parser, rpm=self.rpm_spin.value())
         if self.reader.start():
             self._set_ui(True, port)
+            if self.reader.rpm == 0:
+                pass                                   # 不调速，不加注
+            elif not self.reader.speed_applied:
+                self.st.setText("● 已连接（调速未生效，已按默认转速恢复）")
+            else:
+                self.st.setText(f"● 已连接 {port} · {self.reader.rpm}RPM")
         else:
             self.reader = None
             self.statusBar().showMessage(f"⚠ 打开 {port} 失败（可能被占用）", 4000)

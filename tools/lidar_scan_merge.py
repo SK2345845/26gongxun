@@ -397,7 +397,12 @@ class MergeWindow(fm.MainWindow):
                                       rpm=self.rpm_spin.value())
         if self.reader.start():
             self.cn.setText("断开")
-            self.st.setText(f"已连接 {port}")
+            if self.reader.rpm and self.reader.speed_applied:
+                self.st.setText(f"已连接 {port} · {self.reader.rpm}RPM")
+            elif self.reader.rpm:
+                self.st.setText("已连接（调速未生效，已按默认转速恢复）")
+            else:
+                self.st.setText(f"已连接 {port}")
         else:
             self.reader = None
             self.st.setText("打开串口失败")
