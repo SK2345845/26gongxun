@@ -416,8 +416,8 @@ class MergeWindow(fm.MainWindow):
 
     @staticmethod
     def _pose_base(pose):
-        """位姿里的起点文字 → 场地坐标"""
-        node = "S1" if pose.get("start") == "启停区一" else "S2"
+        """基准点位文字（'启停区一'/'启停区二'）→ 场地坐标"""
+        node = "S1" if pose == "启停区一" else "S2"
         return fm.NODES[node]
 
     def _capture_frame1(self):
@@ -425,13 +425,11 @@ class MergeWindow(fm.MainWindow):
         if raw:
             half = self.fov_spin.value() / 2.0
             self.frame1 = front_points(raw, half)
-            self.frame1_pose = self._cur_pose()   # 记住在哪、朝哪采的
+            self.frame1_pose = self.start_cb.currentText()   # 记住基准点位
             self._draw_local(self.ax_f1, self.frame1,
                              f"第1帧 ({len(self.frame1)}点)", "#16a34a")
             self.cloud_canvas.draw_idle()
-            self.st.setText(f"第1帧：{len(self.frame1)} 点"
-                            f" · 基准 {self.frame1_pose['start']}"
-                            f" 车头{self.frame1_pose['hdg']}°")
+            self.st.setText(f"第1帧：{len(self.frame1)} 点 · 基准 {self.frame1_pose}")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
@@ -440,13 +438,11 @@ class MergeWindow(fm.MainWindow):
         if raw:
             half = self.fov_spin.value() / 2.0
             self.frame2 = front_points(raw, half)
-            self.frame2_pose = self._cur_pose()
+            self.frame2_pose = self.start_cb.currentText()
             self._draw_local(self.ax_f2, self.frame2,
                              f"第2帧 ({len(self.frame2)}点)", "#d97706")
             self.cloud_canvas.draw_idle()
-            self.st.setText(f"第2帧：{len(self.frame2)} 点"
-                            f" · 基准 {self.frame2_pose['start']}"
-                            f" 车头{self.frame2_pose['hdg']}°")
+            self.st.setText(f"第2帧：{len(self.frame2)} 点 · 基准 {self.frame2_pose}")
         else:
             self.st.setText("没采到数据，先连接雷达")
 
@@ -456,37 +452,37 @@ class MergeWindow(fm.MainWindow):
             self.st.setText("请先采集两帧")
             return
 
-        # 每帧用各自采集时的基准转世界坐标：既支持原地转90°，
-        # 也支持两点位各采一帧（第二帧基准忘切会平移障碍——实测踩过的坑）
-        p1 = self.frame1_pose or self._cur_pose()
-        if self.frame2_pose:
-            p2 = self.frame2_pose
-        else:                                # 兜底：老流程 = 原地转 rot 角
-            cur = self._cur_pose()
-            p2 = {"start": cur["start"],
-                  "hdg": (cur["hdg"] + self.rot_spin.value()) % 360,
-                  "off": cur["off"]}
-        b1 = self._pose_base(p1)
-        b2 = self._pose_base(p2)
-        h1 = float(p1["hdg"])
-        h2 = float(p2["hdg"])
+        # 车头角/转角：与实测可靠版完全一致，合并时读取（h2 = 车头角 + 转角），
+        # 采集时不动、也不用记——操作习惯不变
+        # 每帧位姿只记录"基准点位"：修 S2 平移误检（两点位各采一帧时
+        # 第二帧基准忘切会让障碍整体平移），采第2帧前只需切起点位
+        p1 = self.frame1_pose or self.start_cb.currentText()
+        p2 = self.frame2_pose or p1
+        base1 = self._pose_base(p1)
+        base2 = self._pose_base(p2)
 
         self._go()                       # 车体标记落在当前选择的起点位
-        w1 = radar_to_world(self.frame1, b1[0], b1[1], h1, float(p1["off"]))
-        w2 = radar_to_world(self.frame2, b2[0], b2[1], h2, float(p2["off"]))
+        h1 = float(self.hdg_spin.value())
+        rot = float(self.rot_spin.value())
+        off = float(self.off_spin.value())
+        h2 = h1 + rot
+
+        w1 = radar_to_world(self.frame1, base1[0], base1[1], h1, off)
+        w2 = radar_to_world(self.frame2, base2[0], base2[1], h2, off)
         self.merged_cloud = w1 + w2
 
         self.obstacles = detect_obstacles(self.merged_cloud)
 
-        print(f"[合并] 第1帧基准 {p1['start']}·车头{h1:.0f}° | "
-              f"第2帧基准 {p2['start']}·车头{h2:.0f}°")
+        print(f"[合并] 第1帧基准 {p1} | 第2帧基准 {p2} | "
+              f"车头 {h1:.0f}° / 转角 {rot:.0f}°")
         print(f"[合并] 第1帧 {len(self.frame1)} 点, 第2帧 {len(self.frame2)} 点, "
               f"合并 {len(self.merged_cloud)} 点, 检测到 {len(self.obstacles)} 个障碍")
         for i, (ox, oy) in enumerate(self.obstacles, 1):
             print(f"   障碍{i}: ({ox:.0f}, {oy:.0f}) mm")
 
-        self.st.setText(f"障碍 {len(self.obstacles)} 个 · 基准 {p1['start']}{h1:.0f}°/"
-                        f"{p2['start']}{h2:.0f}° · 确认后点「规划路线」")
+        self.st.setText(f"障碍 {len(self.obstacles)} 个 · 基准 {p1}/{p2}"
+                        f" · 车头 {h1:.0f}° + 转角 {rot:.0f}°"
+                        f" · 确认后点「规划路线」")
         self.robot_st.setText(f"状态: 检测到 {len(self.obstacles)} 个障碍，"
                               f"确认无误后点「确认障碍 · 规划路线」")
         self._draw_map()
@@ -524,15 +520,16 @@ def _selftest():
     print(f"[自测] 往返变换: {'OK' if good else 'X 失败'}")
     ok &= good
 
-    # ② S2 基准回归：帧在 S2/180° 采，用逐帧位姿合并必须落回真值位置
+    # ② S2 基准回归：帧在 S2 采（基准记 S2），合并必须落回真值位置
     #   （旧 bug：基准还是 S1 时，点会被平移约 (S1-S2) 的距离）
     pts = [T, (T[0] + 30, T[1]), (T[0], T[1] + 30)]   # 3点成簇
     pol_s2 = [world_to_polar(x, y, s2, 180, off) for x, y in pts]
     win.frame1 = list(pol_s2)
     win.frame2 = list(pol_s2)
-    win.frame1_pose = {"start": "启停区二", "hdg": 180, "off": off}
-    win.frame2_pose = {"start": "启停区二", "hdg": 180, "off": off}
+    win.frame1_pose = "启停区二"
+    win.frame2_pose = "启停区二"
     win.fov_spin.setValue(180)
+    win.rot_spin.setValue(0)          # h2 = 180 + 0
     win._merge_analyze()
     hit = any(math.hypot(ox - T[0], oy - T[1]) < 120
               for ox, oy in win.obstacles)
