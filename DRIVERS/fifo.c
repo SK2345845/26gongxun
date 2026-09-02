@@ -16,7 +16,7 @@ __IO FIFO_t rxFIFO = {0};
 	* @param   нч
 	* @retval  нч
 	*/
-void initQueue(void)
+void fifo_initQueue(void)
 {
 	rxFIFO.ptrRead  = 0;
 	rxFIFO.ptrWrite = 0;

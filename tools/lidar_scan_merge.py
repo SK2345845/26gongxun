@@ -29,6 +29,9 @@
 import sys
 import math
 import time
+import os
+import json
+from datetime import datetime
 
 import numpy as np
 import serial
@@ -36,7 +39,7 @@ import serial.tools.list_ports
 
 from PyQt5.QtWidgets import (QApplication, QWidget, QVBoxLayout, QHBoxLayout,
                              QComboBox, QPushButton, QLabel, QDockWidget,
-                             QSpinBox)
+                             QSpinBox, QFileDialog)
 from PyQt5.QtCore import Qt, QTimer
 
 import matplotlib
@@ -67,7 +70,10 @@ _setup_cjk_font()      # 必须在 import field_map 之后（它会覆盖 rcPara
 MIN_RANGE = 150.0         # 近端门限 15cm：滤车体自回波（车身边缘最近约150mm）
 EXCLUDE_MARGIN = 40.0     # 过滤固定设施时的外扩余量 (mm)
 DBSCAN_EPS = 80.0         # 聚类邻域半径 (mm)，小于两个障碍的最小间距即可
-DBSCAN_MIN_PTS = 3        # 成簇最少点数，低于此算噪声
+DBSCAN_MIN_PTS = 1        # 成簇最少点数，低于此算噪声
+                          # 远处 φ50 障碍只回 1~2 个点，设 3 会漏检
+ANG_BIN = 0.2            # 角度聚合 bin 宽 (°)：越细越能保留远处障碍的多个采样点
+ANG_BINS = int(360.0 / ANG_BIN)   # 1440
 # 前向视场角在 GUI 上调（「前向视场°」，默认 180）
 # ============================================================
 
@@ -300,6 +306,16 @@ class MergeWindow(fm.MainWindow):
         self.plan_btn.setStyleSheet("font-weight:bold")
         v.addWidget(self.plan_btn)
 
+        # 保存 / 加载帧（离线重放调参用）
+        h4 = QHBoxLayout()
+        self.svb = QPushButton("保存帧")
+        self.svb.clicked.connect(self._save_frames)
+        h4.addWidget(self.svb)
+        self.ldbtn = QPushButton("加载帧")
+        self.ldbtn.clicked.connect(self._load_frames)
+        h4.addWidget(self.ldbtn)
+        v.addLayout(h4)
+
         self.st = QLabel("未连接")
         self.st.setStyleSheet("color:#16a085;font-weight:bold")
         v.addWidget(self.st)
@@ -404,9 +420,9 @@ class MergeWindow(fm.MainWindow):
         acc = {}
         for f in frames:
             for a, d in f:
-                b = int(round(a)) % 360
+                b = int(round(a / ANG_BIN)) % ANG_BINS
                 acc[b] = (acc[b] + d) / 2 if b in acc else d
-        return [(float(b), d) for b, d in acc.items()]
+        return [(float(b) * ANG_BIN, d) for b, d in acc.items()]
 
     def _cur_pose(self):
         """当前 GUI 参数作为一帧的采集基准"""
@@ -445,6 +461,80 @@ class MergeWindow(fm.MainWindow):
             self.st.setText(f"第2帧：{len(self.frame2)} 点 · 基准 {self.frame2_pose}")
         else:
             self.st.setText("没采到数据，先连接雷达")
+
+    # ---------------- 帧存取（JSON，含采集参数，可离线重放调参） ----------------
+    def _write_frames(self, path):
+        data = {
+            "type": "lidar_merge_frames",
+            "saved_at": datetime.now().isoformat(timespec="seconds"),
+            "start1": self.frame1_pose,      # 第1帧基准点位（'启停区一'/'启停区二'）
+            "start2": self.frame2_pose,      # 第2帧基准点位
+            "hdg_deg": self.hdg_spin.value(),
+            "rot_deg": self.rot_spin.value(),
+            "radar_off_mm": self.off_spin.value(),
+            "fov_deg": self.fov_spin.value(),
+            "rpm": self.rpm_spin.value(),
+            "frame1": self.frame1,           # [[angle_deg, dist_mm], ...] 已裁剪帧
+            "frame2": self.frame2,
+        }
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(data, f, ensure_ascii=False)
+
+    def _read_frames(self, path):
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if data.get("type") != "lidar_merge_frames":
+            raise ValueError("不是本工具保存的雷达帧文件")
+        if not data.get("frame1") or not data.get("frame2"):
+            raise ValueError("文件里没有完整的两帧数据")
+        self.frame1 = [tuple(p) for p in data["frame1"]]
+        self.frame2 = [tuple(p) for p in data["frame2"]]
+        # 恢复两帧基准点位（同时把起点位下拉框切到第1帧，保持 UI 一致）
+        if data.get("start1"):
+            self.frame1_pose = data["start1"]
+            idx = self.start_cb.findText(data["start1"])
+            if idx >= 0:
+                self.start_cb.setCurrentIndex(idx)
+        if data.get("start2"):
+            self.frame2_pose = data["start2"]
+        # 恢复采集时的参数（字段缺省则保留当前值）
+        for key, spin in (("hdg_deg", self.hdg_spin), ("rot_deg", self.rot_spin),
+                          ("radar_off_mm", self.off_spin), ("fov_deg", self.fov_spin),
+                          ("rpm", self.rpm_spin)):
+            if key in data:
+                spin.setValue(max(spin.minimum(), min(spin.maximum(), int(data[key]))))
+
+    def _save_frames(self):
+        if not self.frame1 or not self.frame2:
+            self.st.setText("没有可保存的帧，先采集两帧")
+            return
+        default = os.path.abspath(f"lidar_frames_{datetime.now():%Y%m%d_%H%M%S}.json")
+        path, _ = QFileDialog.getSaveFileName(self, "保存雷达帧", default,
+                                              "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._write_frames(path)
+            self.st.setText(f"已保存: {os.path.basename(path)}")
+        except Exception as e:
+            self.st.setText(f"保存失败: {e}")
+
+    def _load_frames(self):
+        path, _ = QFileDialog.getOpenFileName(self, "加载雷达帧", "",
+                                              "JSON (*.json)")
+        if not path:
+            return
+        try:
+            self._read_frames(path)
+        except Exception as e:
+            self.st.setText(f"加载失败: {e}")
+            return
+        self._draw_local(self.ax_f1, self.frame1,
+                         f"第1帧 ({len(self.frame1)}点)", "#16a34a")
+        self._draw_local(self.ax_f2, self.frame2,
+                         f"第2帧 ({len(self.frame2)}点)", "#d97706")
+        self.cloud_canvas.draw_idle()
+        self.st.setText(f"已加载: {os.path.basename(path)} · 参数一并恢复，可直接合并")
 
     # ---------------- 合并 + 检测 + 规划 ----------------
     def _merge_analyze(self):

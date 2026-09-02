@@ -4,20 +4,21 @@
 #include "stm32f4xx.h"
 
 /**********************************************************
-***	Emm_V5.0步进闭环控制例程
-***	编写作者：ZHANGDATOU
-***	技术支持：张大头闭环伺服
-***	淘宝店铺：https://zhangdatou.taobao.com
-***	CSDN博客：http s://blog.csdn.net/zhangdatou666
-***	qq交流群：262438510
+***	Emm_V5.0栈
+***	写撸ZHANGDATOU
+***	支郑糯头栈欧
+***	员蹋https://zhangdatou.taobao.com
+***	CSDN停 https://blog.csdn.net/zhangdatou666
+***	qq群262438510
 **********************************************************/
 
-#define 	FIFO_SIZE   128
-typedef struct {
+#define FIFO_SIZE 128
+typedef struct
+{
 	uint16_t buffer[FIFO_SIZE];
 	__IO uint8_t ptrWrite;
 	__IO uint8_t ptrRead;
-}FIFO_t;
+} FIFO_t;
 
 extern __IO FIFO_t rxFIFO;
 
